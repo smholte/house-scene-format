@@ -44,18 +44,25 @@ stored (they are compressed already), JSON deflated.
 | Package | Extension | Holds |
 | --- | --- | --- |
 | House scene | `.hpscene` | `scene.json` (required), `house.glb` (required), `pictures/…` (optional: `preview.png`) |
-| Bake | `.hpbake` | `bake.json` (required), `light/…` (atlas pages `.png`/`.jpg`, optional `.ktx2` copies, vertex light `.bin`), `snow/…` (`.glb` per season), `photos/…` (`.jpg`/`.png`), `videos/…` (`.mp4`/`.webm`) |
+| Bake | `.hpbake` | `bake.json` (required), `light/…` (atlas pages `.png`, optional `.ktx2` copies, vertex light `.bin`), `snow/…` (`.glb` per season), `photos/…` (`.jpg`/`.png`), `videos/…` (`.mp4`/`.webm`) |
 
 Paths other than `scene.json`, `bake.json` and `house.glb` are free; the JSON names every file it uses. A file the
 JSON does not use is a warning, not an error.
 
+**JSON** (`scene.json`, `bake.json`, the `.glb` files' JSON): UTF-8, no `NaN` or `Infinity` (JavaScript cannot read
+them), and **no control characters** (line breaks, tabs …) in any text or key – so a pattern means the same in
+JavaScript and Python.
+
 **Versions.** `scene.json` and `bake.json` start with `"format": "house-scene"` / `"house-bake"` and
-`"version": "<major>.<minor>"` (this text: `"1.0"`). A reader written for version *M.n*:
+`"version": "<major>.<minor>"` (this text: `"1.0"`), two whole numbers compared as numbers (`1.10` is newer than
+`1.9`). A reader written for version *M.n*:
 
 - MUST refuse a package of another **major** version with a clear message, e.g. *"This bake was made by a newer
   Fresing Render (format 2.0). Update House Planner to read it."* – never read half of it.
 - MUST read a newer **minor** version (*M.n+1* …) and ignore fields it does not know. A minor version only ever
-  **adds** optional fields or new values in places where readers are told to skip what they do not know (section 13).
+  **adds** optional fields, or new values in the **open lists** of section 13, where readers are told what to do
+  with a value they do not know. Everything else (the closed lists, the hash, the UV rules, the encoding) changes
+  only with a new major version.
 - SHOULD tell the user once when it read a newer minor version ("made by a newer app; some extras are not shown").
 
 Both apps pin a tag of this repository (`v1.0`, `v1.1`, …) and test against its samples. House Planner offers in its
@@ -73,13 +80,16 @@ export dialog only what the pinned version lists (section 13).
   clockwise seen from above: `[−north.z, north.x]`.
 - Directions of the sun: unit vector from the house **towards** the sun, in glTF axes (section 7.5).
 - Times: a date `YYYY-MM-DD`, a clock time `HH:MM` and the clock's `utc_offset` (`+02:00` = Dutch summer time).
-- Colours and light are linear RGB (Rec.709 primaries), not sRGB-encoded, unless a picture file says otherwise.
+- Light values are linear RGB (Rec.709 primaries). The pictures of materials inside `house.glb` follow glTF (base
+  colour sRGB). Light-map pages are raw numbers (section 8.3), not colours.
 
 ## 4. Surfaces (`house.glb`)
 
-`house.glb` is a binary glTF 2.0 file with **one scene**. Its pictures are inside it (PNG or JPEG; no KTX2, no
-Draco or meshopt compression in version 1 – both apps must read it without extensions). It holds exactly the parts
-the recipe includes (section 7.3), nothing else.
+`house.glb` is a binary glTF 2.0 file with **exactly one scene** (the default one); every surface is reached from
+it, and every node has at most one parent. Its pictures are inside it (PNG or JPEG). `extensionsRequired` MUST be
+empty (no Draco, meshopt or KTX2 in version 1 – both apps must read it as it is); `extensionsUsed` MAY name only
+`KHR_lights_punctual`, `KHR_materials_transmission`, `KHR_materials_emissive_strength`, `KHR_texture_transform`. It
+holds exactly the parts the recipe includes (section 7.3), nothing else.
 
 **Every node that has a mesh is a surface** and MUST carry `extras.hp`; a node without a mesh MAY carry it only when
 it is a lamp (section 4.4). Grouping nodes without a mesh carry no `extras.hp`. The node's `name` MUST equal its id
@@ -100,7 +110,7 @@ it is a lamp (section 4.4). Grouping nodes without a mesh carry no `extras.hp`. 
 | `kind` | required | What it is (table below). |
 | `storey` | required | The storey id (section 7.2) the piece belongs to, or `null` for parts of the plot and the neighbourhood (groups `garden`, `street`, `houses`, `park` – and only they). |
 | `group` | required | Which of House Planner's **Show buttons** hides it: `house` (the building; follows the storey choice), `garden`, `street`, `houses` (Neighbours), `park` (Water & park), `furniture`, `installs` (Electrics), `ceilItems` (Ceiling). These are House Planner's own settings keys. |
-| `bake` | required | `MAP` (a light map on UV set 1), `VERTEX` (light per vertex), or `NO` (takes part in the light – casts shadows, lets light through by its material – but gets no result). |
+| `bake` | required | `MAP` (a light map on UV set 1), `VERTEX` (light per vertex), or `NO` (takes part in the light – casts shadows, lets light through by its material – but gets no result). A `MAP` surface's node may be turned and moved but not scaled or mirrored (its metres are the map's metres). |
 | `hash` | required with a mesh | The surface hash (section 5). |
 | `uv1_px` | required for `MAP` | [W, H]: the size in texels of this surface's light map (section 6). |
 | `source` | optional | The id in House Planner's model the piece comes from (wall, room, furniture item, garden area …). Several surfaces can share one (a wall's two sides and edge). For furniture it names the **piece** that moves as a whole. |
@@ -141,8 +151,13 @@ Surfaces whose map would be larger than a page (section 6) MUST be split into se
 
 ### 4.2 Geometry
 
-- Triangles only (primitive mode 4), with `POSITION` and `NORMAL`; `TEXCOORD_0` (the texture UVs House Planner uses
-  for its materials) and `indices` SHOULD be there. `MAP` surfaces add **`TEXCOORD_1`** (the light-map UVs).
+So that every reader (three.js, Blender, the checker) sees the same vertices in the same order:
+
+- Triangles only (primitive mode 4). `POSITION`, `NORMAL` (and `TEXCOORD_1`) are float32; `TEXCOORD_0` (the texture
+  UVs House Planner uses for its materials) and `indices` SHOULD be there. `MAP` surfaces add **`TEXCOORD_1`** (the
+  light-map UVs), float32 – not normalised integers.
+- Indices are unsigned integers, all below the vertex count, a multiple of 3; **every vertex is used** by a triangle
+  (importers drop unused vertices, and light per vertex would no longer line up). No `sparse` accessors.
   glTF numbers UV sets from 0 without gaps: a primitive with `TEXCOORD_1` MUST have `TEXCOORD_0` (Blender's importer
   drops the light-map UVs otherwise – found while making the samples).
 - A mesh MAY be used by several nodes (a furniture model placed twice); each node is its own surface with its own
@@ -159,13 +174,13 @@ the parts' own materials (0107: glass and see-through parts let light through).
 ### 4.4 Lamps
 
 A lamp is a node with a `KHR_lights_punctual` light (glTF's own lamp extension: point or spot, colour, intensity in
-candela, range), kind `lamp`, and `extras.hp` (group `ceilItems` or `installs`). It MAY have a mesh (the fitting),
+candela, range), kind `lamp`, and `extras.hp` (group `ceilItems`, `installs` or – a standing lamp – `furniture`). It MAY have a mesh (the fitting),
 then it is also a surface (usually `VERTEX`); without a mesh its `bake` is `NO` and it has no hash. Each moment says
 which lamps are on (section 7.5). Blender's importer makes the light a child object of the fitting (measured).
 
 ## 5. The surface hash (`hp-hash/1`)
 
-A surface's hash changes when its geometry or its light-map UVs change, and only then. It is worked out from the
+A surface's hash changes when its geometry, its light-map UVs or its map size change, and only then. It is worked out from the
 mesh **as stored in the .glb** (float32 values), in the node's own coordinates (its transform is not part of it):
 
 ```
@@ -176,6 +191,7 @@ h = SHA-256 of:  "hp-hash/1" + one zero byte
     "U"  + uint16 u, v of each vertex      = clamp(round(TEXCOORD_1 × 65535), 0, 65535)   when TEXCOORD_1 is there
     "N"                                                                       when it is not
          + uint32 index count + uint32 each index        (0, 1, 2 … when the primitive has no indices)
+  then, for a MAP surface only:  "S" + uint32 W + uint32 H        (its uv1_px)
 hash = the first 32 hex digits (lower case) of h
 ```
 
@@ -202,11 +218,12 @@ page_uv = ((rect.x + u × W) / page_width,  (rect.y + v × H) / page_height)    
 
 Rules (checked by `check.py`):
 
-1. Texel density: `texels_per_m` of the recipe (section 7.1). W and H follow from it; each is at most
-   `page_size − 4`.
+1. Texel density: `texels_per_m` of the recipe (section 7.1), in the node's own metres. W and H follow from it;
+   each is at most `page_size − 4`.
 2. A surface's triangles fall into **charts** – flat, connected pieces that share their UV points (a wall side with its
    window hole is one chart; each face of a step is one). Each chart is projected onto its own plane without
-   stretching (1 m = `texels_per_m` texels).
+   stretching: every triangle edge is as long in texels as in metres × `texels_per_m` (the checker allows 2 % +
+   0.1 texel), and no texel centre is covered by two triangles (no folds).
 3. Charts are packed by their **rectangles**: at least **4 texels** between two charts' rectangles, at least
    **2 texels** from a chart to the edge of the map. All UVs lie in 0 … 1. So nothing overlaps and the baker's
    padding (Cycles' bake margin) can fill the gutters.
@@ -290,9 +307,13 @@ results come as a second set (`open`) in each moment (section 8.3), for that sto
   `"none"` or a list of lamp ids). Each moment gets its own baked light; the owner chooses which combinations to bake.
 - `sun` is written by House Planner with its own sun formula (NOAA, `src/sun.js`; `hsf/sun.py` is the same):
   `azimuth` degrees clockwise from north, `elevation` degrees above the horizon (negative at night) and `direction`,
-  the unit vector towards the sun in glTF axes (section 3). The baker MUST use these – for Fresing Render:
-  `lightbake.bake(..., sky={"sun_height": elevation, "sun_direction": <direction turned into the scene's azimuth>})`
-  – and not work the sun out from the time. The checker warns when the sun is more than 2° from where it stands at
+  the unit vector towards the sun in glTF axes (section 3). The baker MUST use these and not work the sun out from
+  the time. In Blender's axes the direction is **(d.x, −d.z, d.y)**; for Fresing Render:
+  `lightbake.bake(..., sky={"sun_height": elevation, "sun_direction": <that vector's azimuth in its own sky
+  convention>})` – the turn from a vector to its sky's `sun_rotation` (0109's `SUN_ROTATION_ZERO_AZ`) is Fresing
+  Render's to write (I24c). Example (the sample's summer morning): direction (0.8436, 0.4902, 0.2192) → Blender
+  (0.8436, −0.2192, 0.4902): elevation 29.35°, the sun's bearing turned 14.6° from Blender's +X towards −Y. A moment with the sun
+  below the horizon (elevation < 0) has **no sun** in the bake: sky (night sky) and lamps only. The checker warns when the sun is more than 2° from where it stands at
   the date, time, offset and place (a time-zone mistake).
 
 ### 7.6 Cameras, photos, videos
@@ -358,23 +379,33 @@ A result is either **on a page** – `{"page", "rect": [x, y, w, h]}` in texels,
 corner, `w × h` = the surface's `uv1_px` – or **per vertex** (8.4). A surface is `MAP` in the scene ⇔ its result is on
 a page; `VERTEX` ⇔ per vertex.
 
-**Pages** are PNG (lossless, preferred) or JPEG (quality ≥ 90) pictures, 8-bit RGB, 256, 512, 1024 or 2048 px on
-each side and at most the recipe's `page_size`. Rectangles on a page MUST NOT overlap; the baker SHOULD leave 2 texels between them
-and fill each rectangle's gutters (rule 3 of section 6). A page MAY carry an optional `ktx2` copy (Basis Universal,
-same size, for phones – 0009); a reader that does not use KTX2 ignores it.
+**Pages** are **PNG**, 8-bit RGB (colour type 2), not interlaced, with **no colour chunks** (`gAMA`, `iCCP`,
+`sRGB`, `cHRM`, `cICP` …: their bytes are raw numbers, and a browser would convert them), 256, 512, 1024 or 2048 px
+on each side and at most the recipe's `page_size`. (No JPEG: its 8 × 8 blocks bleed across the 2-texel gutters.)
+Rectangles on a page MUST NOT overlap; the baker SHOULD leave 2 texels between them and fill each rectangle's
+gutters (rule 3 of section 6). Readers load pages **without any colour conversion, without flipping** (row 0 is the
+top) and **without mipmaps** – in three.js `colorSpace = NoColorSpace`, `flipY = false`, `generateMipmaps = false`,
+`minFilter = LinearFilter`. A page MAY carry an optional `ktx2` copy (Basis Universal, same size and content, for
+phones – 0009); a reader that does not use KTX2 ignores it.
 
-**Encoding** (the same curve as 0107's `core/lightmap.encode`): a stored byte `b` (0 … 255) per channel means
+**Encoding.** The stored value is **absolute light** `L`, per channel:
 
 ```
-L = scale × (b / 255) ^ curve          curve = 2.0
+encode:  b = clamp(round(255 × sqrt(max(L, 0) / scale)), 0, 255)      round = half away from zero (section 5)
+decode:  L = scale × (b / 255) ^ 2
 ```
 
 `L` is linear RGB light: **the colour a white matte surface shows** (0107's units: Cycles DIFFUSE without colour,
-before exposure and view transform). Multiply by a surface's base colour for its matte look. `scale` is one number per
-moment (0107: the 99.9th percentile of the moment's values, at least the reference). `reference` = the same light on
-an open, upward-facing surface with nothing round it (0107's probe) – `L / reference` is the *light factor* (1 =
-open sky above, corners < 1). `exposure` = the EV Fresing Render's render of that moment uses (0109's exposure
+before exposure and view transform). Multiply by a surface's base colour for its matte look. `curve` is 2.0 (the
+square root above); `scale` is one positive number per moment, chosen by the baker – recommended: the 99.9th
+percentile of all channel values of the moment's results (brighter values clip at 255). `reference` = the light on an
+open, upward-facing surface with nothing round it (0107's probe), RGB – `L / reference` is 0107's *light factor* F
+(1 = open sky above, corners < 1). `exposure` = the EV Fresing Render's render of that moment uses (0109's exposure
 channel), so night moments can be shown as bright as Fresing Render shows them.
+
+This is the curve of 0107's `core/lightmap.encode`, but on **L**, not on F: 0107's web export stores F with one
+scale for the export. Fresing Render must not store F here (it would be off by the reference – about 250× at
+night); with 0107's function: `encode(L, scale)`, i.e. its F replaced by L and its scale by this moment's.
 
 House Planner can show a moment two ways: **factor** – `L / reference` times its own sky light (as 0107's web page
 does: baked and live surfaces agree even if its sky differs a little from Cycles'); or **absolute** – `L` × 2^exposure
@@ -385,7 +416,7 @@ does: baked and live surfaces agree even if its sky differs a little from Cycles
 `vertex_files` are raw `.bin` files: 3 bytes (R, G, B; the encoding of 8.3, with the moment's `scale`) per vertex.
 A result `{"vertex", "offset", "count"}` starts at vertex `offset` of that file; `count` MUST equal the surface's
 vertex count (all its primitives, in order) and the values follow the `.glb`'s vertex order. Several surfaces and
-moments may share one file.
+moments may use one file, but every result has **its own** values (ranges never overlap).
 
 ### 8.5 Furniture and other placed pieces
 
@@ -429,13 +460,15 @@ with. `problems`: plain sentences for the owner (what was skipped or changed); H
 - Import `house.glb` with Blender's glTF importer (merge vertices off). Each object's custom property `hp` is its
   label; `hp["id"]` is the id to write results under (0107's `ids={object: hp["id"]}`).
 - `MAP` objects: `lightbake.bake(objects, light=recipe.light, uv="UV1", texels_per_m=recipe.quality.texels_per_m,
-  samples=…, sky=<the moment's sun>, lamps=<the moment's lamps>, ...)`; `Item.pixels` (H × W, Blender rows bottom-up)
-  → the page rectangle (top-down). `VERTEX` objects: `uv="VERTEX"`; `Item.values` → the vertex file in the glb's
+  samples=…, sky=<the moment's sun>, lamps=<the moment's lamps>, ...)`; each object's image MUST be exactly its
+  `uv1_px` (W × H) – 0107 sizes `UV1` images "from their area", so `lightbake.bake` needs a per-object size (a
+  request to Fresing Render's Web 3D lane). `Item.pixels` (H × W, Blender rows bottom-up) → the page rectangle
+  (top-down). `VERTEX` objects: `uv="VERTEX"`; `Item.values` → the vertex file in the glb's
   vertex order. `NO` objects take part in the light only.
 - Per moment: move the sun (`sky`), set clouds and lamps; per season: build the snow (0109's snow on imported
   objects, `weather_look.add_objects`), hide `foliage` when `bare`; for each `open` storey: hide what lies above it
   and bake that storey's objects again.
-- Encode with the moment's `scale` and write the package.
+- Encode absolute L with the moment's `scale` (8.3) and write the package.
 
 ## 11. Sizes (phones)
 
@@ -458,22 +491,28 @@ with. `problems`: plain sentences for the owner (what was skipped or changed); H
 
 ## 13. Options of version 1.0
 
-What House Planner may offer and Fresing Render must handle. A later minor version adds to these lists; readers
-skip values they do not know (a moment with an unknown `lamps` value, a video of an unknown kind, an unknown `kind`
-of surface – treated as `other`, an unknown `group` – treated as `house`).
+What House Planner may offer and Fresing Render must handle.
+
+**Open lists** – a later minor version may add values; a reader that meets a value it does not know does what the
+last column says (the checker accepts it in a newer minor version):
+
+| Where | Values in 1.0 | Unknown value |
+| --- | --- | --- |
+| surface `kind` | section 4.1 | treat as `other` |
+| surface `group`, `recipe.include.groups` | `house`, `garden`, `street`, `houses`, `park`, `furniture`, `installs`, `ceilItems` | show it with the house; no storey rule |
+| `recipe.quality.preset` | `DRAFT`, `NORMAL`, `FINE` | use `texels_per_m` and `samples` as given (`NORMAL` when samples is null) |
+| `seasons[].foliage` | `full`, `autumn`, `bare` | treat as `full` |
+| `moments[].lamps` | `all`, `none`, a list of lamp ids | treat as `none` |
+| `videos[].kind` | `turntable` | skip that video |
+| `videos[].fps` | 24, 25, 30, 50, 60 | use 25 |
+
+**Closed lists** – a new value is a new **major** version (a reader that does not know it cannot do the right thing):
 
 | Where | Values |
 | --- | --- |
-| `recipe.light` | `LIVE`, `SOFT`, `ALL` |
-| `recipe.quality.preset` | `DRAFT`, `NORMAL`, `FINE` |
-| `recipe.quality.page_size` | 1024, 2048 |
-| `seasons[].foliage` | `full`, `autumn`, `bare` |
-| `moments[].lamps` | `all`, `none`, a list of lamp ids |
-| `videos[].kind` | `turntable` |
-| `videos[].fps` | 24, 25, 30, 50, 60 |
-| surface `kind` | section 4.1 |
-| surface `group` | `house`, `garden`, `street`, `houses`, `park`, `furniture`, `installs`, `ceilItems` |
+| `recipe.light`, `bake.light` | `LIVE`, `SOFT`, `ALL` |
 | surface `bake` | `MAP`, `VERTEX`, `NO` |
-| result | page rectangle, per vertex |
-| pages | PNG, JPEG (+ optional KTX2 copy); 256, 512, 1024, 2048 px a side |
-| photos / videos | JPEG, PNG / MP4, WebM |
+| a result | a page rectangle, light per vertex |
+| `recipe.quality.page_size`, page sizes | 1024, 2048 / 256, 512, 1024, 2048 px a side |
+| `hash`, `uv1`, the encoding | `hp-hash/1`, `hp-uv/1`, `curve` 2.0 |
+| files | pages PNG (+ optional KTX2 copy), photos JPEG / PNG, videos MP4 / WebM, `.glb` without required extensions |

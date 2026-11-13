@@ -37,3 +37,12 @@ GitHub runs the same at every push (`.github/workflows/check.yml`, about a minut
   0 without gaps): the light-map UVs vanished. A primitive with `TEXCOORD_1` must have `TEXCOORD_0` (checked).
 - Blender's importer keeps vertex count and order (merge vertices off), turns v into 1 − v and keeps `extras` as a
   custom property (`ob["hp"]`); glTF (x, y, z) arrives as Blender (x, −z, y).
+- Python's `$` in a pattern also matches before a final line break, JavaScript's does not; Python's `json` reads
+  `NaN`, JavaScript's does not. The format forbids both (control characters, NaN/Infinity) so the two apps agree.
+- A light-map page is numbers, not a picture: PNG colour chunks (`gAMA`, `sRGB` …) make browsers convert it, JPEG
+  blocks bleed across 2-texel gutters, mipmaps mix neighbouring rectangles. PNG 8-bit RGB without colour chunks,
+  loaded raw (three.js `NoColorSpace`, `flipY = false`, no mipmaps).
+- An independent reviewer (task 0016) found six crashes of the checker and that 0107's encoding stores light *relative
+  to the sky* while this format stores *absolute* light – all 43 of the author's tests had passed. Give the checker to
+  someone who did not write it.
+

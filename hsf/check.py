@@ -13,9 +13,9 @@ from pathlib import Path
 import jsonschema
 
 from . import surface as S
-from .glb import Glb, GlbError, is_identity
-from .images import picture_info
-from .package import Package, PackageError
+from .glb import Glb, GlbError, is_identity, is_rigid
+from .images import page_png_problem, picture_info
+from .package import Package, PackageError, control_text
 from .sun import sun_position, utc_moment
 
 SUPPORTED = (1, 0)  # the version this checker is written for: reads 1.x, knows the fields of 1.0
@@ -69,17 +69,17 @@ def parse_version(v) -> tuple[int, int] | None:
 
 
 def _relax(schema):
-    """The schema for a newer minor version: unknown fields allowed, and new values in lists of choices
-    ('enum'); fixed values ('const': the format's name, the hash and UV rules) stay."""
+    """The schema for a newer minor version: unknown fields allowed, and new values in the lists of choices marked
+    "x-extensible" (FORMAT.md section 13). Other lists and fixed values stay: a new value there is a new major."""
     s = copy.deepcopy(schema)
 
     def walk(x):
         if isinstance(x, dict):
             if x.get("additionalProperties") is False:
                 del x["additionalProperties"]
-            if "enum" in x:
+            if x.pop("x-extensible", False) and "enum" in x:
                 kinds = {type(v) for v in x.pop("enum")}
-                x["type"] = "string" if kinds == {str} else ("integer" if kinds == {int} else x.get("type", "string"))
+                x["type"] = "integer" if kinds == {int} else "string"
             for v in x.values():
                 walk(v)
         elif isinstance(x, list):
@@ -136,89 +136,146 @@ class Surfaces:
         self.lamps: set[str] = set()
 
 
-def read_surfaces(glb: Glb, rep: Report, where: str, relaxed: bool, *, snow: bool) -> Surfaces:
+ALLOWED_EXTENSIONS = ("KHR_lights_punctual", "KHR_materials_transmission", "KHR_materials_emissive_strength",
+                      "KHR_texture_transform")
+
+
+def glb_problems(glb: Glb) -> list[str]:
+    """The .glb as a whole: one scene, a tree of nodes, no required extensions, extensions version 1 knows."""
+    doc = glb.json
+    out = []
+    if doc.get("extensionsRequired"):
+        out.append(f"extensionsRequired {doc['extensionsRequired']}: version 1 allows no required extension "
+                   "(no Draco, meshopt or KTX2 inside house.glb)")
+    used = doc.get("extensionsUsed", [])
+    if not isinstance(used, list) or any(e not in ALLOWED_EXTENSIONS for e in used):
+        out.append(f"extensionsUsed {used}: version 1 allows only {', '.join(ALLOWED_EXTENSIONS)}")
+    if len(doc.get("scenes", [])) != 1:
+        out.append(f"{len(doc.get('scenes', []))} scenes – exactly one is allowed")
+    lights = ((doc.get("extensions") or {}).get("KHR_lights_punctual") or {}).get("lights", [])
+    for i, n in enumerate(doc.get("nodes", []) if isinstance(doc.get("nodes"), list) else []):
+        li = ((n.get("extensions") or {}).get("KHR_lights_punctual") or {}).get("light") if isinstance(n, dict) \
+            else None
+        if li is not None and (not isinstance(li, int) or not (0 <= li < len(lights))):
+            out.append(f"node {i}: light {li!r} does not exist")
+    return out
+
+
+def read_surfaces(glb: Glb, rep: Report, where: str, relaxed: bool, *, snow: bool,
+                  texels_per_m: float | None = None) -> Surfaces:
     out = Surfaces()
-    nodes = glb.json.get("nodes", [])
+    for p in glb_problems(glb):
+        rep.error(f"{where}: {p}")
     try:
         world = glb.world_matrices()
     except Exception as e:  # noqa: BLE001 – a broken node tree is reported, not raised
         rep.error(f"{where}: its node tree cannot be read ({e})")
         return out
+    nodes = glb.json.get("nodes", [])
     surf_schema = jsonschema.Draft202012Validator(_schema("surface", relaxed))
-    meshes = glb.json.get("meshes", [])
     for i, node in enumerate(nodes):
-        hp = (node.get("extras") or {}).get("hp")
-        has_mesh = "mesh" in node
-        light = ((node.get("extensions") or {}).get("KHR_lights_punctual") or {}).get("light")
-        if hp is None:
-            if has_mesh:
-                rep.error(f"{where} node {i} ('{node.get('name', '')}'): a mesh without extras.hp – every piece of "
-                          "geometry needs an id, a storey and a group")
-            if light is not None:
-                rep.error(f"{where} node {i}: a light without extras.hp")
-            continue
-        errs = list(surf_schema.iter_errors(hp))
-        for e in errs[:5]:
-            at = "/".join(str(p) for p in e.absolute_path) or "(top)"
-            rep.error(f"{where} node {i} extras.hp {at}: {e.message}")
-        if errs:
-            continue
-        sid = hp["id"]
-        if sid in out.by_id:
-            rep.error(f"{where}: id '{sid}' is used by two nodes")
-            continue
-        if i not in world:
-            rep.error(f"{where}: '{sid}' is not in the glb's scene (no scene reaches its node)")
-            continue
-        if node.get("name") != sid:
-            rep.error(f"{where}: node of '{sid}' must be named '{sid}' (it is '{node.get('name')}')")
-        if snow != (hp["kind"] == "snow"):
-            rep.error(f"{where}: '{sid}' has kind '{hp['kind']}'" + (
-                " – a snow file holds only snow" if snow else " – snow belongs in a bake package's snow files"))
-        if snow and "on" not in hp:
-            rep.error(f"{where}: snow '{sid}' does not say which surface it lies 'on'")
-        if not snow and "on" in hp:
-            rep.error(f"{where}: '{sid}' has 'on' – only snow lies on another surface")
-        info = {"node": i, "hp": hp, "matrix": world[i], "mesh": node.get("mesh"), "verts": 0}
-        if not has_mesh:
-            if hp["kind"] != "lamp" or light is None:
-                rep.error(f"{where}: '{sid}' has no mesh – only a lamp (kind 'lamp' with a KHR_lights_punctual "
-                          "light) may be a node without one")
-            if hp["bake"] != "NO":
-                rep.error(f"{where}: lamp '{sid}' without a mesh must have bake 'NO'")
-            out.lamps.add(sid)
-            out.by_id[sid] = info
-            continue
-        if light is not None:
-            if hp["kind"] != "lamp":
-                rep.error(f"{where}: '{sid}' carries a light but its kind is '{hp['kind']}', not 'lamp'")
-            out.lamps.add(sid)
-        if not (0 <= node["mesh"] < len(meshes)):
-            rep.error(f"{where}: '{sid}' points at mesh {node['mesh']}, which does not exist")
-            continue
-        if "hash" not in hp:
-            rep.error(f"{where}: '{sid}' has a mesh but no hash")
-            continue
         try:
-            h = S.surface_hash(glb, node["mesh"])
-            info["verts"] = S.vertex_count(glb, node["mesh"])
-        except (GlbError, KeyError, TypeError) as e:
-            rep.error(f"{where}: '{sid}': its mesh cannot be read ({e})")
-            continue
-        prims = meshes[node["mesh"]].get("primitives", [])
-        if any("NORMAL" not in p.get("attributes", {}) for p in prims):
-            rep.error(f"{where}: '{sid}': a primitive without NORMAL")
-        if h != hp["hash"]:
-            rep.error(f"{where}: '{sid}': hash {hp['hash']} does not match its geometry ({h}, {S.HASH_NAME})")
-        if hp["kind"] in NO_LIGHT_KINDS and hp["bake"] != "NO":
-            rep.error(f"{where}: '{sid}' is {hp['kind']}: it lets light through and must have bake 'NO'")
-        if hp["bake"] == "MAP":
-            _check_uv1(glb, node["mesh"], hp, rep, where)
-        elif "uv1_px" in hp:
-            rep.warn(f"{where}: '{sid}' has uv1_px but bake '{hp['bake']}' – it is ignored")
-        info["box"] = _box(glb, node["mesh"], world[i])
-        out.by_id[sid] = info
+            _one_surface(glb, i, node, world, out, rep, where, surf_schema, snow, texels_per_m)
+        except Exception as e:  # noqa: BLE001 – whatever a hostile file holds: report it, never crash
+            rep.error(f"{where} node {i}: cannot be read ({type(e).__name__}: {e})")
     return out
+
+
+def _one_surface(glb, i, node, world, out, rep, where, surf_schema, snow, texels_per_m):
+    extras = node.get("extras")
+    hp = extras.get("hp") if isinstance(extras, dict) else None
+    has_mesh = "mesh" in node
+    ext = node.get("extensions")
+    light = ((ext.get("KHR_lights_punctual") or {}).get("light")) if isinstance(ext, dict) else None
+    if hp is None:
+        if has_mesh:
+            rep.error(f"{where} node {i} ('{node.get('name', '')}'): a mesh without extras.hp – every piece of "
+                      "geometry needs an id, a storey and a group")
+        if light is not None:
+            rep.error(f"{where} node {i}: a light without extras.hp")
+        return
+    bad = control_text(hp)
+    if bad:
+        rep.error(f"{where} node {i} extras.hp: {bad}")
+        return
+    errs = list(surf_schema.iter_errors(hp))
+    for e in errs[:5]:
+        at = "/".join(str(p) for p in e.absolute_path) or "(top)"
+        rep.error(f"{where} node {i} extras.hp {at}: {e.message}")
+    if errs:
+        return
+    sid = hp["id"]
+    if S.id_problem(sid):
+        rep.error(f"{where} node {i}: id {sid!r} {S.id_problem(sid)}")
+        return
+    if sid in out.by_id:
+        rep.error(f"{where}: id '{sid}' is used by two nodes")
+        return
+    if i not in world:
+        rep.error(f"{where}: '{sid}' is not in the glb's scene (the scene does not reach its node)")
+        return
+    if node.get("name") != sid:
+        rep.error(f"{where}: node of '{sid}' must be named '{sid}' (it is '{node.get('name')}')")
+    if snow != (hp["kind"] == "snow"):
+        rep.error(f"{where}: '{sid}' has kind '{hp['kind']}'" + (
+            " – a snow file holds only snow" if snow else " – snow belongs in a bake package's snow files"))
+    if snow and "on" not in hp:
+        rep.error(f"{where}: snow '{sid}' does not say which surface it lies 'on'")
+    if not snow and "on" in hp:
+        rep.error(f"{where}: '{sid}' has 'on' – only snow lies on another surface")
+    if hp["kind"] == "lamp" and hp["group"] in S.GROUPS and hp["group"] not in S.LAMP_GROUPS:
+        rep.error(f"{where}: lamp '{sid}' is in group '{hp['group']}' – lamps are in "
+                  f"{', '.join(S.LAMP_GROUPS)}")
+    info = {"node": i, "hp": hp, "matrix": world[i], "mesh": node.get("mesh"), "verts": 0}
+    if not has_mesh:
+        if hp["kind"] != "lamp" or light is None:
+            rep.error(f"{where}: '{sid}' has no mesh – only a lamp (kind 'lamp' with a KHR_lights_punctual "
+                      "light) may be a node without one")
+        if hp["bake"] != "NO":
+            rep.error(f"{where}: lamp '{sid}' without a mesh must have bake 'NO'")
+        out.lamps.add(sid)
+        out.by_id[sid] = info
+        return
+    if light is not None:
+        if hp["kind"] != "lamp":
+            rep.error(f"{where}: '{sid}' carries a light but its kind is '{hp['kind']}', not 'lamp'")
+        out.lamps.add(sid)
+    mi = node["mesh"]
+    if not isinstance(mi, int) or isinstance(mi, bool) or not (0 <= mi < len(glb.json.get("meshes", []))):
+        rep.error(f"{where}: '{sid}' points at mesh {mi!r}, which does not exist")
+        return
+    if "hash" not in hp:
+        rep.error(f"{where}: '{sid}' has a mesh but no hash")
+        return
+    probs = S.mesh_problems(glb, mi)
+    for p in probs[:3]:
+        rep.error(f"{where}: '{sid}': {p}")
+    if probs:
+        return
+    is_map = hp["bake"] == "MAP"
+    if is_map and "uv1_px" not in hp:
+        rep.error(f"{where}: '{sid}' has bake 'MAP' but no uv1_px")
+        return
+    try:
+        h = S.surface_hash(glb, mi, hp["uv1_px"] if is_map else None)
+    except GlbError as e:
+        rep.error(f"{where}: '{sid}': {e}")
+        return
+    info["verts"] = S.vertex_count(glb, mi)
+    if h != hp["hash"]:
+        rep.error(f"{where}: '{sid}': hash {hp['hash']} does not match its geometry ({h}, {S.HASH_NAME})")
+    if hp["kind"] in NO_LIGHT_KINDS and hp["bake"] != "NO":
+        rep.error(f"{where}: '{sid}' is {hp['kind']}: it lets light through and must have bake 'NO'")
+    if is_map:
+        if not is_rigid(world[i]):
+            rep.error(f"{where}: '{sid}' has bake 'MAP' but its node is scaled or mirrored – a surface with a light "
+                      "map may only be turned and moved (its metres are the light map's metres)")
+        else:
+            _check_uv1(glb, mi, hp, rep, where, texels_per_m)
+    elif "uv1_px" in hp:
+        rep.warn(f"{where}: '{sid}' has uv1_px but bake '{hp['bake']}' – it is ignored")
+    info["box"] = _box(glb, mi, world[i])
+    out.by_id[sid] = info
 
 
 def _box(glb: Glb, mesh_index: int, m: list[float]) -> list[float]:
@@ -234,13 +291,15 @@ def _box(glb: Glb, mesh_index: int, m: list[float]) -> list[float]:
     return lo + hi
 
 
-def _check_uv1(glb: Glb, mesh_index: int, hp: dict, rep: Report, where: str) -> None:
-    """hp-uv/1 (FORMAT.md section 6): UV1 in [0, 1]; charts (triangles joined by shared UV points) packed by their
-    rectangles with GAP_PX between them and BORDER_PX to the map's edge, at the map size uv1_px."""
+DENSITY_TOL = 0.02   # an edge's length in the map may differ 2 % (+ 0.1 texel) from its length in metres x texels_per_m
+MAX_RASTER = 4 * 2048 * 2048
+
+
+def _check_uv1(glb: Glb, mesh_index: int, hp: dict, rep: Report, where: str, texels_per_m) -> None:
+    """hp-uv/1 (FORMAT.md section 6): float UV1 in 0 … 1; every edge as long in texels as in metres x
+    texels_per_m (no stretching); charts (triangles joined by shared UV points) packed by their rectangles with
+    GAP_PX between them and BORDER_PX to the map's edge; no texel centre covered twice."""
     sid = hp["id"]
-    if "uv1_px" not in hp:
-        rep.error(f"{where}: '{sid}' has bake 'MAP' but no uv1_px")
-        return
     W, H = hp["uv1_px"]
     parent: dict = {}
 
@@ -251,11 +310,9 @@ def _check_uv1(glb: Glb, mesh_index: int, hp: dict, rep: Report, where: str) -> 
         return a
 
     tris = []
-    for prim in glb.json["meshes"][mesh_index].get("primitives", []):
-        if prim.get("mode", 4) != 4:
-            rep.error(f"{where}: '{sid}': only triangle primitives (mode 4) may be baked")
-            return
-        if "TEXCOORD_1" not in prim.get("attributes", {}):
+    stretched = 0
+    for prim in glb.json["meshes"][mesh_index]["primitives"]:
+        if "TEXCOORD_1" not in prim["attributes"]:
             rep.error(f"{where}: '{sid}' has bake 'MAP' but a primitive without TEXCOORD_1 (the light-map UVs)")
             return
         if "TEXCOORD_0" not in prim["attributes"]:
@@ -263,28 +320,39 @@ def _check_uv1(glb: Glb, mesh_index: int, hp: dict, rep: Report, where: str) -> 
                       "gaps, and Blender's importer then drops the light-map UVs")
             return
         uv = glb.accessor(prim["attributes"]["TEXCOORD_1"])
+        pos = glb.accessor(prim["attributes"]["POSITION"])
         bad = [t for t in uv if not (-1e-6 <= t[0] <= 1 + 1e-6 and -1e-6 <= t[1] <= 1 + 1e-6)]
         if bad:
             rep.error(f"{where}: '{sid}': {len(bad)} light-map UVs lie outside 0 … 1")
             return
         idx = glb.accessor(prim["indices"]) if "indices" in prim else list(range(len(uv)))
         for k in range(0, len(idx) - 2, 3):
+            tri = idx[k:k + 3]
             keys = []
-            for j in idx[k:k + 3]:
+            for j in tri:
                 u, v = uv[j]
                 key = (S.round_half_away(u * W * 64), S.round_half_away(v * H * 64))  # 1/64 texel
                 parent.setdefault(key, key)
                 keys.append(key)
             parent[find(keys[1])] = find(keys[0])
             parent[find(keys[2])] = find(keys[0])
-            tris.append(([uv[j] for j in idx[k:k + 3]], keys[0]))
+            px = [(uv[j][0] * W, uv[j][1] * H) for j in tri]
+            tris.append((px, keys[0]))
+            if texels_per_m:
+                for a, b in ((0, 1), (1, 2), (2, 0)):
+                    want = math.dist(pos[tri[a]], pos[tri[b]]) * texels_per_m
+                    if abs(math.dist(px[a], px[b]) - want) > DENSITY_TOL * want + 0.1:
+                        stretched += 1
+                        break
+    if stretched:
+        rep.error(f"{where}: '{sid}': {stretched} triangles are stretched in the light map – 1 m must be "
+                  f"{texels_per_m:g} texels (recipe.quality.texels_per_m) in every direction")
+        return
     rects: dict = {}
     for pts, key in tris:
         r = find(key)
-        x0 = min(t[0] for t in pts) * W
-        x1 = max(t[0] for t in pts) * W
-        y0 = min(t[1] for t in pts) * H
-        y1 = max(t[1] for t in pts) * H
+        x0, x1 = min(t[0] for t in pts), max(t[0] for t in pts)
+        y0, y1 = min(t[1] for t in pts), max(t[1] for t in pts)
         if r in rects:
             a = rects[r]
             rects[r] = [min(a[0], x0), min(a[1], y0), max(a[2], x1), max(a[3], y1)]
@@ -306,6 +374,43 @@ def _check_uv1(glb: Glb, mesh_index: int, hp: dict, rep: Report, where: str) -> 
                 rep.error(f"{where}: '{sid}': two light-map charts lie closer than {GAP_PX} texels (or overlap) in "
                           f"its {W} x {H} map")
                 return
+    if W * H <= MAX_RASTER:
+        twice = _covered_twice(tris, W, H)
+        if twice:
+            rep.error(f"{where}: '{sid}': {twice} texels are covered by two triangles – the light map folds over "
+                      "itself")
+
+
+def _covered_twice(tris, W: int, H: int) -> int:
+    """How many texel centres lie in more than one triangle (both windings count)."""
+    seen = bytearray(W * H)
+    twice = 0
+    ex, ey = 1.3e-4, 2.7e-4  # a hair off the centre, so a centre on a shared edge counts once
+    for (a, b, c), _ in tris:
+        area = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+        if abs(area) < 1e-12:
+            continue
+        sgn = 1 if area > 0 else -1
+        x0 = max(0, math.floor(min(a[0], b[0], c[0]) - 0.5))
+        x1 = min(W - 1, math.ceil(max(a[0], b[0], c[0]) - 0.5))
+        y0 = max(0, math.floor(min(a[1], b[1], c[1]) - 0.5))
+        y1 = min(H - 1, math.ceil(max(a[1], b[1], c[1]) - 0.5))
+        for y in range(y0, y1 + 1):
+            py = y + 0.5 + ey
+            for x in range(x0, x1 + 1):
+                qx = x + 0.5 + ex
+                if sgn * ((b[0] - a[0]) * (py - a[1]) - (b[1] - a[1]) * (qx - a[0])) < 0:
+                    continue
+                if sgn * ((c[0] - b[0]) * (py - b[1]) - (c[1] - b[1]) * (qx - b[0])) < 0:
+                    continue
+                if sgn * ((a[0] - c[0]) * (py - c[1]) - (a[1] - c[1]) * (qx - c[0])) < 0:
+                    continue
+                k = y * W + x
+                if seen[k]:
+                    twice += 1
+                else:
+                    seen[k] = 1
+    return twice
 
 
 # ---------------------------------------------------------------- the scene package
@@ -415,7 +520,8 @@ def check_scene(pkg: Package, rep: Report) -> dict | None:
     except GlbError as e:
         rep.error(f"house.glb: {e}")
         return None
-    surf = read_surfaces(glb, rep, "house.glb", relaxed, snow=False)
+    surf = read_surfaces(glb, rep, "house.glb", relaxed, snow=False,
+                         texels_per_m=rec["quality"]["texels_per_m"])
     page = rec["quality"]["page_size"]
     inc_st, inc_gr = set(rec["include"]["storeys"]), set(rec["include"]["groups"])
     texels = 0
@@ -423,7 +529,9 @@ def check_scene(pkg: Package, rep: Report) -> dict | None:
         hp = info["hp"]
         if hp["group"] not in inc_gr:
             rep.error(f"house.glb: '{sid}' is in group '{hp['group']}', which recipe.include.groups leaves out")
-        if hp["group"] in SITE_GROUPS:
+        if hp["group"] not in S.GROUPS:
+            pass  # a group of a newer minor version: its storey rule is not known here
+        elif hp["group"] in SITE_GROUPS:
             if hp["storey"] is not None:
                 rep.error(f"house.glb: '{sid}' (group '{hp['group']}') belongs to no storey: storey must be null")
         elif hp["storey"] is None:
@@ -468,7 +576,10 @@ def check_bake(pkg: Package, rep: Report, scene: dict | None = None) -> None:
     page_size = {}
     for p in doc["pages"]:
         used.add(p["file"])
-        _picture(pkg, p["file"], rep, f"page '{p['id']}'", p["size"])
+        if _picture(pkg, p["file"], rep, f"page '{p['id']}'", p["size"], kinds=("png",)):
+            why = page_png_problem(pkg.files[p["file"]])
+            if why:
+                rep.error(f"page '{p['id']}' ({p['file']}): {why}")
         page_size[p["id"]] = p["size"]
         if "ktx2" in p:
             used.add(p["ktx2"])
@@ -509,6 +620,7 @@ def check_bake(pkg: Package, rep: Report, scene: dict | None = None) -> None:
         rep.error("light 'LIVE' bakes nothing, yet the package holds light maps")
     _unique(doc["moments"], "moment", rep)
     on_page: dict[str, list] = {}
+    on_file: dict[str, list] = {}
     for m in doc["moments"]:
         variants = [("", m["maps"])] + [(f" open '{k}'", v) for k, v in m["open"].items()]
         for label, maps in variants:
@@ -532,6 +644,8 @@ def check_bake(pkg: Package, rep: Report, scene: dict | None = None) -> None:
                     elif e["offset"] + e["count"] > vcount.get(e["vertex"], 0):
                         rep.error(f"{where}: its {e['count']} values from {e['offset']} run past the end of "
                                   f"vertex file '{e['vertex']}'")
+                    else:
+                        on_file.setdefault(e["vertex"], []).append((e["offset"], e["offset"] + e["count"], where))
                 if sid in snow_ids:
                     s = snow_ids[sid]
                     if scene is not None:
@@ -548,6 +662,11 @@ def check_bake(pkg: Package, rep: Report, scene: dict | None = None) -> None:
                     break
                 if b[1] < a[3] and a[1] < b[3]:
                     rep.error(f"page '{pid}': {a[4]} and {b[4]} overlap")
+    for fid, ranges in on_file.items():
+        ranges.sort()
+        for a, b in zip(ranges, ranges[1:]):
+            if b[0] < a[1]:
+                rep.error(f"vertex file '{fid}': {a[2]} and {b[2]} share values – every result has its own")
     for p in doc["photos"]:
         used.add(p["file"])
         _picture(pkg, p["file"], rep, f"photo '{p['id']}'", p["size"])
@@ -684,6 +803,14 @@ def check(path_or_pkg, scene=None) -> Report:
     except (PackageError, OSError) as e:
         rep.error(str(e))
         return rep
+    try:
+        return _check(pkg, rep, scene)
+    except Exception as e:  # noqa: BLE001 – a hostile package is reported, never a crash
+        rep.error(f"the checker could not read this package ({type(e).__name__}: {e})")
+        return rep
+
+
+def _check(pkg: Package, rep: Report, scene) -> Report:
     if pkg.kind == "house-scene":
         check_scene(pkg, rep)
         return rep

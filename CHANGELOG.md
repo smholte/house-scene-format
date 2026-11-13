@@ -14,3 +14,9 @@ First version (House Planner task 0016), for the two leads' review:
   "open", seasons (0109: snow cover, wet; foliage), moments with House Planner's sun, cameras, photos, turntable
   videos. Walk paths reserved for a later minor version.
 - Made-up samples (`tools/make_samples.py`), `check.py`, tests, GitHub workflow.
+- After an independent review (same task): light stored as absolute L with an exact encode (not 0107's factor F);
+  pages PNG only, 8-bit RGB without colour chunks, loaded raw; meshes every reader reads alike (triangles, float
+  positions and light-map UVs, every vertex used, no sparse accessors); the UV rules checked in full (no stretching,
+  no folds) and the map size in the hash; one scene, single parents, no required extensions; no NaN and no control
+  characters in JSON; open and closed lists of choices (minor versions extend only the open ones); the checker reports
+  a hostile file instead of crashing.

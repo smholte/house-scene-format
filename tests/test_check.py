@@ -179,7 +179,7 @@ def test_bad_id_and_name():
 
 def test_normals_are_needed():
     has(scene_errors(edit_glb(files_of(SCENE), "house.glb", lambda d, g: d["meshes"][node(d, "floor:r_bed")["mesh"]]
-                              ["primitives"][0]["attributes"].pop("NORMAL"))), "without NORMAL")
+                              ["primitives"][0]["attributes"].pop("NORMAL"))), "no NORMAL")
 
 
 def test_mesh_without_labels():
@@ -270,7 +270,7 @@ def _set_uv1(doc, g, sid, fn):
         struct.pack_into("<2f", b, view["byteOffset"] + 8 * i, *t)
     g.bin = bytes(b)
     hp = node(doc, sid)["extras"]["hp"]
-    hp["hash"] = S.surface_hash(Glb(doc, g.bin), node(doc, sid)["mesh"])
+    hp["hash"] = S.surface_hash(Glb(doc, g.bin), node(doc, sid)["mesh"], hp.get("uv1_px"))
 
 
 def _rehash_scene(files):
@@ -292,12 +292,43 @@ def test_uv1_rules():
                                                      lambda uv: [(max(0.0, u - 0.02), v) for u, v in uv])))
     has(scene_errors(f), "closer than 2 texels to the edge")
 
-    # two charts of the roof slid onto each other
-    def squash(uv):
-        return [(0.2 + u * 0.01, 0.2 + v * 0.01) for u, v in uv]
-    f = _rehash_scene(edit_glb(files_of(SCENE), "house.glb",
-                               lambda d, g: _set_uv1(d, g, "roof:st_first:0", squash)))
-    has(scene_errors(f), "closer than 4 texels")
+    # one of the roof's charts (one quad each) slid to 1 texel from another, not stretched
+    def near(doc, g):
+        W = node(doc, "roof:st_first:0")["extras"]["hp"]["uv1_px"][0]
+
+        def fn(uv):
+            q1, q2 = uv[4:8], uv[8:12]
+            H = node(doc, "roof:st_first:0")["extras"]["hp"]["uv1_px"][1]
+            r1 = [min(u for u, v in q1), min(v for u, v in q1), max(u for u, v in q1), max(v for u, v in q1)]
+            w2 = max(u for u, v in q2) - min(u for u, v in q2)
+            h2 = max(v for u, v in q2) - min(v for u, v in q2)
+            for x, y in ((r1[2] + 1 / W, r1[1]), (r1[0] - 1 / W - w2, r1[1]), (r1[0], r1[3] + 1 / H),
+                         (r1[0], r1[1] - 1 / H - h2)):
+                if 3 / W <= x and x + w2 <= 1 - 3 / W and 3 / H <= y and y + h2 <= 1 - 3 / H:
+                    break
+            du, dv = x - min(u for u, v in q2), y - min(v for u, v in q2)
+            return uv[:8] + [(u + du, v + dv) for u, v in q2] + uv[12:]
+        _set_uv1(doc, g, "roof:st_first:0", fn)
+    f = _rehash_scene(edit_glb(files_of(SCENE), "house.glb", near))
+    errs = scene_errors(f)
+    assert len(errs) == 1, errs
+    has(errs, "closer than 4 texels")
+
+    # a map four times too large for its texels per metre: stretched
+    def bigger(doc, g):
+        node(doc, "floor:r_bed")["extras"]["hp"]["uv1_px"] = [4 * x for x in
+                                                               node(doc, "floor:r_bed")["extras"]["hp"]["uv1_px"]]
+        _set_uv1(doc, g, "floor:r_bed", lambda uv: uv)
+    f = _rehash_scene(edit_glb(files_of(SCENE), "house.glb", bigger))
+    has(scene_errors(f), "stretched")
+
+
+def test_folded_map_is_found():
+    from hsf.check import _covered_twice
+    a, b, c, d = (0.5, 0.5), (8.5, 0.5), (8.5, 8.5), (0.5, 8.5)
+    assert _covered_twice([((a, b, c), 0), ((a, c, d), 0)], 10, 10) == 0          # a quad: the shared edge once
+    assert _covered_twice([((a, b, c), 0), ((a, c, b), 0)], 10, 10) > 0           # the same triangle, turned over
+    assert _covered_twice([((a, b, c), 0), ((a, (8.5, 4.5), d), 0)], 10, 10) > 0  # two that overlap in part
 
 
 def test_map_must_fit_a_page():
@@ -397,7 +428,7 @@ def test_bake_pictures():
     has(bake_errors(f), "bake.json says 2048")
     f = files_of(BAKE)
     f["light/p0.png"] = b"not a picture"
-    has(bake_errors(f), "is not a PNG or JPEG")
+    has(bake_errors(f), "is not a PNG")
 
 
 def test_bake_against_the_recipe():
@@ -478,3 +509,149 @@ def test_broken_scene_for_cross_checks():
 def test_schemas_are_valid(name):
     import jsonschema
     jsonschema.Draft202012Validator.check_schema(json.loads((ROOT / "schemas" / f"{name}.schema.json").read_text()))
+
+
+# ------------------------------------------------------------------ the independent review's findings (task 0016)
+def _pos_view(doc, sid):
+    acc = doc["accessors"][doc["meshes"][node(doc, sid)["mesh"]]["primitives"][0]["attributes"]["POSITION"]]
+    return doc["bufferViews"][acc["bufferView"]]["byteOffset"]
+
+
+def _poke_pos(sid, value):
+    def fn(doc, g):
+        b = bytearray(g.bin)
+        struct.pack_into("<f", b, _pos_view(doc, sid), value)
+        g.bin = bytes(b)
+    return fn
+
+
+@pytest.mark.parametrize("what,fn,text", [
+    ("NaN position", _poke_pos("floor:r_bed", float("nan")), "not a finite number"),
+    ("3,000 km away", _poke_pos("floor:r_bed", 3.0e6), "2,147 km"),
+    ("mesh as text", lambda d, g: node(d, "floor:r_bed").update(mesh="0"), "does not exist"),
+    ("extras a list", lambda d, g: node(d, "floor:r_bed").update(extras=[1]), "without extras.hp"),
+    ("node a list", lambda d, g: d["nodes"].__setitem__(3, [1]), "not an object"),
+    ("count as text", lambda d, g: d["accessors"][0].update(count="x"), "values for"),
+    ("index past the end", lambda d, g: d["accessors"][d["meshes"][node(d, "floor:r_bed")["mesh"]]["primitives"][0]
+                                                       ["indices"]].update(count=10 ** 3), "cannot be read"),
+])
+def test_hostile_glb_is_reported_not_raised(what, fn, text):
+    errs = scene_errors(edit_glb(files_of(SCENE), "house.glb", fn))
+    assert errs, what
+    has(errs, text)
+
+
+def test_json_without_nan_and_control_characters():
+    f = files_of(SCENE)
+    f["scene.json"] = f["scene.json"].replace(b'"latitude": 53.5', b'"latitude": NaN')
+    has(scene_errors(f), "NaN")
+    has(scene_errors(edit_json(files_of(SCENE), "scene.json", lambda d: d.update(id="sample-house-a\n"))),
+        "control character")
+    has(scene_errors(edit_glb(files_of(SCENE), "house.glb",
+                              lambda d, g: node(d, "floor:r_bed")["extras"]["hp"].update(id="floor:r_bed\n"))),
+        "control character")
+
+
+def _prim(d, sid):
+    return d["meshes"][node(d, sid)["mesh"]]["primitives"][0]
+
+
+def test_meshes_every_reader_reads_the_same():
+    has(scene_errors(edit_glb(files_of(SCENE), "house.glb", lambda d, g: _prim(d, "furniture:f_table:0")
+                              .update(mode=0))), "mode 4")
+    has(scene_errors(edit_glb(files_of(SCENE), "house.glb", lambda d, g: d["accessors"][
+        _prim(d, "furniture:f_table:0")["attributes"]["POSITION"]].update(
+        sparse={"count": 1, "indices": {"bufferView": 0, "componentType": 5125}, "values": {"bufferView": 0}}))),
+        "sparse")
+
+    def unused(d, g):  # leave out the last triangle: its vertices are no longer used
+        acc = d["accessors"][_prim(d, "furniture:f_table:0")["indices"]]
+        acc["count"] -= 6
+    has(scene_errors(edit_glb(files_of(SCENE), "house.glb", unused)), "not used by any triangle")
+
+    def odd(d, g):
+        d["accessors"][_prim(d, "furniture:f_table:0")["indices"]]["count"] -= 1
+    has(scene_errors(edit_glb(files_of(SCENE), "house.glb", odd)), "whole number of triangles")
+
+
+def test_map_surfaces_are_not_scaled():
+    f = edit_glb(files_of(SCENE), "house.glb",
+                 lambda d, g: node(d, "floor:r_bed").update(scale=[2.0, 1.0, 2.0]))
+    has(scene_errors(f), "scaled or mirrored")
+
+
+def test_lamp_groups():
+    has(scene_errors(edit_glb(files_of(SCENE), "house.glb",
+                              lambda d, g: node(d, "lamp:p_living_1")["extras"]["hp"].update(group="house"))),
+        "lamps are in")
+
+
+def test_glb_structure():
+    has(scene_errors(edit_glb(files_of(SCENE), "house.glb",
+                              lambda d, g: d.update(extensionsRequired=["KHR_draco_mesh_compression"]))),
+        "extensionsRequired")
+
+    def second_scene(d, g):
+        i = d["nodes"].index(node(d, "floor:r_bed"))
+        d["scenes"][0]["nodes"].remove(i)
+        d["scenes"].append({"nodes": [i]})
+    errs = scene_errors(edit_glb(files_of(SCENE), "house.glb", second_scene))
+    has(errs, "exactly one")
+    has(errs, "does not reach its node")
+
+    def two_parents(d, g):
+        d["nodes"].append({"name": "group a", "children": [5]})
+        d["nodes"].append({"name": "group b", "children": [5]})
+    has(scene_errors(edit_glb(files_of(SCENE), "house.glb", two_parents)), "two parents")
+    has(scene_errors(edit_glb(files_of(SCENE), "house.glb", lambda d, g: node(d, "lamp:p_living_1")["extensions"]
+                              ["KHR_lights_punctual"].update(light=99))), "light 99 does not exist")
+
+
+def _png_with(chunk: bytes, depth=8, ctype=2) -> bytes:
+    import zlib
+    w = h = 1024
+    raw = (b"\0" + b"\0" * (w * 3 * depth // 8 * (4 if ctype == 6 else 3) // 3)) * h
+
+    def c(kind, body):
+        return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body) & 0xFFFFFFFF)
+    return (b"\x89PNG\r\n\x1a\n" + c(b"IHDR", struct.pack(">IIBBBBB", w, h, depth, ctype, 0, 0, 0)) + chunk
+            + c(b"IDAT", zlib.compress(raw)) + c(b"IEND", b""))
+
+
+def test_pages_carry_raw_values():
+    import zlib
+    gama = struct.pack(">I", 4) + b"gAMA" + struct.pack(">I", 45455) + struct.pack(
+        ">I", zlib.crc32(b"gAMA" + struct.pack(">I", 45455)) & 0xFFFFFFFF)
+    f = files_of(BAKE)
+    f["light/p0.png"] = _png_with(gama)
+    has(bake_errors(f), "gAMA")
+    f = files_of(BAKE)
+    f["light/p0.png"] = _png_with(b"", depth=16)
+    has(bake_errors(f), "8-bit RGB")
+
+
+def test_vertex_results_do_not_share_values():
+    def share(d):
+        d["moments"][0]["maps"]["lamp:p_living_1"] = dict(d["moments"][0]["maps"]["furniture:f_table:0"],
+                                                          count=20)
+    has(bake_errors(edit_json(files_of(BAKE), "bake.json", share)), "share values")
+
+
+def test_minor_versions_extend_only_the_open_lists():
+    def newer_group(doc, g):
+        node(doc, "ground:plot")["extras"]["hp"]["group"] = "allotment"
+    f = edit_json(edit_glb(files_of(SCENE), "house.glb", newer_group), "scene.json",
+                  lambda d: (d.update(version="1.1"), d["recipe"]["include"]["groups"].append("allotment")))
+    rep = check(zipped(f))
+    assert rep.ok, rep.text()
+    # the light choice, bake kinds and page sizes are not open: a new value there needs a new major version
+    f = edit_json(files_of(SCENE), "scene.json", lambda d: (d.update(version="1.1"), d["recipe"].update(light="HALF")))
+    has(check(zipped(f)).errors, "light")
+    f = edit_glb(edit_json(files_of(SCENE), "scene.json", lambda d: d.update(version="1.1")), "house.glb",
+                 lambda d, g: node(d, "floor:r_bed")["extras"]["hp"].update(bake="PROBE"))
+    has(check(zipped(f)).errors, "bake")
+
+
+def test_minor_versions_compare_as_numbers():
+    rep = check(zipped(edit_json(files_of(SCENE), "scene.json", lambda d: d.update(version="1.10"))))
+    assert rep.ok and any("1.10 is newer" in w for w in rep.warnings)

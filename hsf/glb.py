@@ -7,6 +7,7 @@ Writing: ``GlbWriter`` collects buffer views and accessors and ``to_bytes()`` gi
 from __future__ import annotations
 
 import json
+import math
 import struct
 
 MAGIC = 0x46546C67  # "glTF"
@@ -54,14 +55,14 @@ class Glb:
                 raise GlbError("cut-off chunk")
             if ctype == CHUNK_JSON and doc is None:
                 try:
-                    doc = json.loads(body.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError) as e:
+                    doc = json.loads(body.decode("utf-8"), parse_constant=_no_constant)
+                except (UnicodeDecodeError, ValueError) as e:
                     raise GlbError(f"its JSON chunk is not valid JSON: {e}") from None
             elif ctype == CHUNK_BIN and not binary:
                 binary = bytes(body)
             pos += 8 + clen
-        if doc is None:
-            raise GlbError("no JSON chunk")
+        if not isinstance(doc, dict):
+            raise GlbError("no JSON chunk with a glTF object")
         return cls(doc, binary)
 
     # ---- accessors ----
@@ -78,7 +79,11 @@ class Glb:
         n = COUNT.get(acc.get("type"))
         if n is None:
             raise GlbError(f"accessor {index}: unknown type {acc.get('type')}")
-        count = int(acc.get("count", 0))
+        count = acc.get("count", 0)
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            raise GlbError(f"accessor {index}: count {count!r} is not a whole number")
+        if not isinstance(acc.get("bufferView", 0), int):
+            raise GlbError(f"accessor {index}: bufferView is not a number")
         if "bufferView" not in acc:  # all zeros (glTF allows it)
             zero = (0.0,) * n
             return [zero[0] if n == 1 else zero for _ in range(count)]
@@ -113,20 +118,41 @@ class Glb:
 
     # ---- nodes ----
     def world_matrices(self) -> dict[int, list[float]]:
-        """Node index -> its world matrix (column-major, 16 numbers) for every node reached from a scene."""
+        """Node index -> its world matrix (column-major, 16 numbers) for every node reached from the default scene
+        (``scene``, else scene 0). Raises GlbError for a node tree that is not a tree."""
         nodes = self.json.get("nodes", [])
+        scenes = self.json.get("scenes", [])
+        if not isinstance(nodes, list) or not isinstance(scenes, list) or not scenes:
+            raise GlbError("no scene")
+        si = self.json.get("scene", 0)
+        if not isinstance(si, int) or not (0 <= si < len(scenes)) or not isinstance(scenes[si], dict):
+            raise GlbError(f"scene {si!r} does not exist")
+        parents: dict[int, int] = {}
+        for i, n in enumerate(nodes):
+            if not isinstance(n, dict):
+                raise GlbError(f"node {i} is not an object")
+            for c in n.get("children", []):
+                if not isinstance(c, int) or not (0 <= c < len(nodes)):
+                    raise GlbError(f"node {i}: child {c!r} does not exist")
+                if c in parents:
+                    raise GlbError(f"node {c} has two parents")
+                parents[c] = i
         out: dict[int, list[float]] = {}
-        roots = []
-        for sc in self.json.get("scenes", []):
-            roots += sc.get("nodes", [])
+        roots = scenes[si].get("nodes", [])
+        for r in roots:
+            if not isinstance(r, int) or not (0 <= r < len(nodes)):
+                raise GlbError(f"the scene's node {r!r} does not exist")
+            if r in parents:
+                raise GlbError(f"node {r} is a root of the scene and also a child")
         stack = [(r, IDENTITY) for r in roots]
-        seen = set()
         while stack:
             i, parent = stack.pop()
-            if i in seen or not (0 <= i < len(nodes)):
-                continue
-            seen.add(i)
-            m = mat_mul(parent, local_matrix(nodes[i]))
+            if i in out:
+                raise GlbError(f"node {i} is reached twice (a loop or a node listed twice)")
+            m = local_matrix(nodes[i])
+            if len(m) != 16 or not all(isinstance(x, (int, float)) and math.isfinite(x) for x in m):
+                raise GlbError(f"node {i}: its transform is not 16 finite numbers")
+            m = mat_mul(parent, m)
             out[i] = m
             for c in nodes[i].get("children", []):
                 stack.append((c, m))
@@ -134,6 +160,24 @@ class Glb:
 
 
 IDENTITY = [1.0, 0, 0, 0, 0, 1.0, 0, 0, 0, 0, 1.0, 0, 0, 0, 0, 1.0]
+
+
+def _no_constant(name):
+    raise ValueError(f"{name} is not allowed in JSON")
+
+
+def is_rigid(m: list[float], eps: float = 1e-4) -> bool:
+    """True when the matrix only turns and moves (no scale, no shear, no mirror)."""
+    cols = [m[0:3], m[4:7], m[8:11]]
+    for i in range(3):
+        for j in range(3):
+            d = sum(a * b for a, b in zip(cols[i], cols[j]))
+            if abs(d - (1.0 if i == j else 0.0)) > eps:
+                return False
+    det = (cols[0][0] * (cols[1][1] * cols[2][2] - cols[1][2] * cols[2][1])
+           - cols[1][0] * (cols[0][1] * cols[2][2] - cols[0][2] * cols[2][1])
+           + cols[2][0] * (cols[0][1] * cols[1][2] - cols[0][2] * cols[1][1]))
+    return det > 0
 
 
 def local_matrix(node: dict) -> list[float]:

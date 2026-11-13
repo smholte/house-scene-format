@@ -40,7 +40,8 @@
     "park",
     "snow",
     "other"
-   ]
+   ],
+   "x-extensible": true
   },
   "storey": {
    "oneOf": [
@@ -63,7 +64,8 @@
     "furniture",
     "installs",
     "ceilItems"
-   ]
+   ],
+   "x-extensible": true
   },
   "bake": {
    "enum": [

@@ -327,7 +327,7 @@ def build_glb(parts: list[Part]) -> tuple[bytes, dict]:
         if not attempt:
             g = Glb.parse(data)
             for i, p in enumerate(parts):
-                extra[p.id]["hash"] = S.surface_hash(g, i)
+                extra[p.id]["hash"] = S.surface_hash(g, i, extra[p.id]["px"] if p.bake == "MAP" else None)
     return data, extra
 
 

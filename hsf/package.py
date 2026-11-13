@@ -17,6 +17,29 @@ class PackageError(ValueError):
     pass
 
 
+def _no_constant(name):
+    raise ValueError(f"{name} is not allowed (JSON has no NaN or Infinity)")
+
+
+def control_text(obj, at="") -> str | None:
+    """Where a text (or a key) holds a control character such as a line break – not allowed anywhere in the
+    format's JSON (JavaScript and Python would read patterns differently)."""
+    if isinstance(obj, str):
+        return f"text at {at or '(top)'} holds a control character" if any(ord(c) < 32 or ord(c) == 127
+                                                                             for c in obj) else None
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            r = control_text(k, at + "/" + str(k)[:20]) or control_text(v, at + "/" + str(k)[:20])
+            if r:
+                return r
+    if isinstance(obj, list):
+        for i, v in enumerate(obj):
+            r = control_text(v, f"{at}/{i}")
+            if r:
+                return r
+    return None
+
+
 def safe_name(name: str) -> str | None:
     """Why a path inside a package is not allowed, or None when it is fine."""
     if not name or name.startswith("/") or "\\" in name or ":" in name.split("/")[0]:
@@ -39,11 +62,14 @@ class Package:
         self.main = main[0]
         self.kind = KINDS[self.main][0]
         try:
-            self.doc = json.loads(files[self.main].decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as e:
+            self.doc = json.loads(files[self.main].decode("utf-8"), parse_constant=_no_constant)
+        except (UnicodeDecodeError, ValueError) as e:
             raise PackageError(f"{self.main} is not valid JSON (UTF-8): {e}") from None
         if not isinstance(self.doc, dict):
             raise PackageError(f"{self.main} must hold a JSON object")
+        bad = control_text(self.doc)
+        if bad:
+            raise PackageError(f"{self.main}: {bad}")
 
     @classmethod
     def open(cls, path_or_bytes) -> "Package":

@@ -43,8 +43,9 @@ KINDS = (
 GROUPS = ("house", "garden", "street", "houses", "park", "furniture", "installs", "ceilItems")
 
 BAKE = ("MAP", "VERTEX", "NO")
+LAMP_GROUPS = ("ceilItems", "installs", "furniture")
 
-ID_RE = re.compile(r"^[a-z][a-z0-9-]*:[A-Za-z0-9_.:-]+$")
+ID_RE = re.compile(r"[a-z][a-z0-9-]*:[A-Za-z0-9_.:-]+")
 ID_MAX = 63  # Blender's longest object name, in bytes
 
 
@@ -53,7 +54,7 @@ def id_problem(sid) -> str | None:
         return "is not text"
     if len(sid.encode("utf-8")) > ID_MAX:
         return f"is longer than {ID_MAX} bytes"
-    if not ID_RE.match(sid):
+    if not ID_RE.fullmatch(sid):
         return "is not '<kind>:<name>' (letters, digits, _ . : - only)"
     return None
 
@@ -63,31 +64,106 @@ def round_half_away(x: float) -> int:
     return int(math.floor(x + 0.5)) if x >= 0 else -int(math.floor(-x + 0.5))
 
 
-def surface_hash(glb: Glb, mesh_index: int) -> str:
-    """The surface hash ``hp-hash/1`` of a mesh (FORMAT.md section 5): SHA-256 of its primitives' positions (mm),
-    light-map UVs (TEXCOORD_1, 1/65535) and indices, in the file's order; the first 32 hex digits."""
+INT32 = 2**31 - 1
+
+
+def mesh_problems(glb: Glb, mesh_index: int) -> list[str]:
+    """What makes a mesh unreadable in the same way by every reader (FORMAT.md section 4.2): triangles only, float
+    positions, no sparse accessors, unsigned indices in range in threes, every vertex used."""
+    out = []
     try:
         mesh = glb.json["meshes"][mesh_index]
+        prims = mesh["primitives"]
+        assert isinstance(prims, list) and prims
+    except (KeyError, IndexError, TypeError, AssertionError):
+        return [f"mesh {mesh_index} does not exist or has no primitives"]
+    accs = glb.json.get("accessors", [])
+    for k, prim in enumerate(prims):
+        at = f"primitive {k}"
+        if not isinstance(prim, dict) or not isinstance(prim.get("attributes"), dict):
+            out.append(f"{at}: not a glTF primitive")
+            continue
+        if prim.get("mode", 4) != 4:
+            out.append(f"{at}: only triangles (mode 4)")
+        attrs = prim["attributes"]
+        if "POSITION" not in attrs:
+            out.append(f"{at}: no POSITION")
+            continue
+        used = list(attrs.values()) + ([prim["indices"]] if "indices" in prim else [])
+        for a in used:
+            if not isinstance(a, int) or not (0 <= a < len(accs)) or not isinstance(accs[a], dict):
+                out.append(f"{at}: accessor {a!r} does not exist")
+                return out
+            if "sparse" in accs[a]:
+                out.append(f"{at}: sparse accessors are not allowed")
+        if "NORMAL" not in attrs:
+            out.append(f"{at}: no NORMAL")
+        n = accs[attrs["POSITION"]].get("count")
+        for name in ("POSITION", "NORMAL", "TEXCOORD_1"):
+            if name in attrs:
+                acc = accs[attrs[name]]
+                want = "VEC2" if name == "TEXCOORD_1" else "VEC3"
+                if acc.get("componentType") != 5126 or acc.get("type") != want or acc.get("normalized"):
+                    out.append(f"{at}: {name} must be float {want}")
+        for name, a in attrs.items():
+            if accs[a].get("count") != n:
+                out.append(f"{at}: {name} has {accs[a].get('count')} values for {n} vertices")
+        if out:
+            return out
+        if "indices" in prim:
+            acc = accs[prim["indices"]]
+            if acc.get("componentType") not in (5121, 5123, 5125) or acc.get("type") != "SCALAR" \
+                    or acc.get("normalized"):
+                out.append(f"{at}: indices must be unsigned integers")
+                continue
+            idx = glb.accessor(prim["indices"])
+            if len(idx) % 3:
+                out.append(f"{at}: {len(idx)} indices is not a whole number of triangles")
+            if any(i >= n for i in idx):
+                out.append(f"{at}: an index points past its {n} vertices")
+            elif len(set(idx)) != n:
+                out.append(f"{at}: {n - len(set(idx))} vertices are not used by any triangle (importers drop "
+                           "them, and light per vertex would no longer line up)")
+        elif n % 3:
+            out.append(f"{at}: {n} vertices without indices is not a whole number of triangles")
+    return out
+
+
+def surface_hash(glb: Glb, mesh_index: int, uv1_px=None) -> str:
+    """The surface hash ``hp-hash/1`` of a mesh (FORMAT.md section 5): SHA-256 of its primitives' positions (mm),
+    light-map UVs (TEXCOORD_1, 1/65535) and indices, in the file's order, and the map size ``uv1_px``; the first 32
+    hex digits."""
+    try:
+        mesh = glb.json["meshes"][mesh_index]
+        prims = mesh["primitives"]
     except (KeyError, IndexError, TypeError):
         raise GlbError(f"mesh {mesh_index} does not exist") from None
     h = hashlib.sha256(HASH_NAME.encode() + b"\0")
-    for prim in mesh.get("primitives", []):
+    for prim in prims:
         attrs = prim.get("attributes", {})
         if "POSITION" not in attrs:
             raise GlbError(f"mesh {mesh_index}: a primitive without POSITION")
         pos = glb.accessor(attrs["POSITION"])
+        if not all(math.isfinite(c) for p in pos for c in p):
+            raise GlbError(f"mesh {mesh_index}: a position is not a finite number")
         flat = [round_half_away(c * 1000.0) for p in pos for c in p]
+        if any(abs(c) > INT32 for c in flat):
+            raise GlbError(f"mesh {mesh_index}: a position lies more than 2,147 km from the origin")
         h.update(b"P" + struct.pack("<I", len(pos)) + struct.pack(f"<{len(flat)}i", *flat))
         if "TEXCOORD_1" in attrs:
             uv = glb.accessor(attrs["TEXCOORD_1"])
             if len(uv) != len(pos):
                 raise GlbError(f"mesh {mesh_index}: TEXCOORD_1 has {len(uv)} values for {len(pos)} vertices")
+            if not all(math.isfinite(c) for t in uv for c in t):
+                raise GlbError(f"mesh {mesh_index}: a light-map UV is not a finite number")
             q = [min(65535, max(0, round_half_away(c * 65535.0))) for t in uv for c in t]
             h.update(b"U" + struct.pack(f"<{len(q)}H", *q))
         else:
             h.update(b"N")
         idx = glb.accessor(prim["indices"]) if "indices" in prim else list(range(len(pos)))
         h.update(struct.pack("<I", len(idx)) + struct.pack(f"<{len(idx)}I", *[int(i) for i in idx]))
+    if uv1_px is not None:
+        h.update(b"S" + struct.pack("<II", int(uv1_px[0]), int(uv1_px[1])))
     return h.hexdigest()[:32]
 
 

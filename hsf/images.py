@@ -36,6 +36,36 @@ def picture_info(data: bytes) -> tuple[str, int, int] | None:
     return None
 
 
+COLOUR_CHUNKS = (b"gAMA", b"iCCP", b"sRGB", b"cHRM", b"cICP", b"mDCV", b"cLLI", b"tRNS")
+
+
+def page_png_problem(data: bytes) -> str | None:
+    """Why a PNG is not a light-map page (FORMAT.md 8.3): 8-bit RGB, not interlaced, no colour chunks (a browser
+    would colour-convert the stored values)."""
+    if data[:8] != PNG_SIG:
+        return "not a PNG"
+    pos = 8
+    first = True
+    while pos + 8 <= len(data):
+        n = struct.unpack(">I", data[pos:pos + 4])[0]
+        kind = data[pos + 4:pos + 8]
+        if first:
+            if kind != b"IHDR" or n != 13:
+                return "no IHDR first"
+            w, h, depth, ctype, _, _, inter = struct.unpack(">IIBBBBB", data[pos + 8:pos + 21])
+            if (depth, ctype) != (8, 2):
+                return f"{depth}-bit colour type {ctype} – pages are 8-bit RGB (colour type 2) without alpha"
+            if inter:
+                return "interlaced"
+            first = False
+        if kind in COLOUR_CHUNKS:
+            return f"it has a {kind.decode()} chunk – pages carry no colour information (browsers would convert)"
+        if kind == b"IEND":
+            return None
+        pos += 12 + n
+    return "cut off (no IEND)"
+
+
 def png_rgb(width: int, height: int, rows: list[bytes]) -> bytes:
     """An 8-bit RGB PNG from ``height`` rows of ``width * 3`` bytes (row 0 = the top). Deterministic."""
     assert len(rows) == height and all(len(r) == width * 3 for r in rows)
