@@ -3,7 +3,7 @@
 Versions of the house scene format. Newest first. A minor version only adds (section 2 of FORMAT.md); each version is
 a tag (`v1.0`, `v1.1` …) that House Planner and Fresing Render pin.
 
-## 1.0 – draft (13 Nov 2026) – not tagged yet
+## 1.0 – 13 Nov 2026 – first version (tag `v1.0` by the House Planner lead)
 
 First version (House Planner task 0016), for the two leads' review:
 - `.hpscene` (scene.json + house.glb) and `.hpbake` (bake.json + light-map pages, light per vertex, snow, photos,
@@ -20,3 +20,8 @@ First version (House Planner task 0016), for the two leads' review:
   no folds) and the map size in the hash; one scene, single parents, no required extensions; no NaN and no control
   characters in JSON; open and closed lists of choices (minor versions extend only the open ones); the checker reports
   a hostile file instead of crashing.
+- After both leads' review: texel density per surface (`extras.hp.texels_per_m`, `recipe.quality.texels_per_m_by_group`;
+  each map checked against its own surface – the plot of the sample at 6 texels/m); optional `sun_light` per moment
+  (the sun's direct light for `SOFT` in absolute mode); the night sky in the bake as Fresing Render renders it; snow
+  layers as new geometry by 0109's rule; Blender's import with Lighting Mode "Standard" and `lightbake.bake(...,
+  sizes=...)` named in section 10.

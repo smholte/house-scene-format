@@ -32,7 +32,8 @@ SCENE_FILE = "sample-house.hpscene"
 BAKE_FILE = "sample-house.hpbake"
 CREATED = "2026-11-13T12:00:00Z"
 GENERATOR = {"app": "house-scene-format sample maker", "version": "1.0"}
-TPM = 16.0          # texels per metre of the sample (a Draft bake)
+TPM = 16.0          # texels per metre of the sample (a Draft bake): the recipe's default
+TPM_BY_GROUP = {"garden": 6.0}  # the plot needs less detail than the house (recipe.quality.texels_per_m_by_group)
 PAGE = 1024
 PLACE = {"latitude": 53.5, "longitude": 3.5, "north_deg": 15.0, "ground_level": -0.15}  # a made-up spot at sea
 
@@ -102,7 +103,8 @@ class Part:
     """One surface: charts (lists of quads), its House Planner labels, and how it is baked."""
 
     def __init__(self, sid, kind, storey, group, bake, material, charts, source=None, matrix=None, light=None,
-                 on=None):
+                 on=None, tpm=None):
+        self.tpm = tpm  # its own texels per metre (extras.hp.texels_per_m), else the recipe's for its group
         self.id, self.kind, self.storey, self.group, self.bake = sid, kind, storey, group, bake
         self.material, self.charts, self.source, self.matrix, self.light, self.on = (
             material, charts, source, matrix, light, on)
@@ -232,7 +234,7 @@ def house_parts() -> list[Part]:
     parts.append(Part("ground:plot", "ground", None, "garden", "MAP", "grass",
                       [ring_y((-4, 11, -6, 17), (0, 7, 0, 12), G)], "plot"))
     parts.append(Part("garden:ga_terrace", "garden", None, "garden", "MAP", "paving",
-                      [[q] for q in box(0, 7, G, G + 0.02, 9, 12, "+y +x -x +z")], "ga_terrace"))
+                      [[q] for q in box(0, 7, G, G + 0.02, 9, 12, "+y +x -x +z")], "ga_terrace", tpm=10.0))
     return parts
 
 
@@ -273,7 +275,8 @@ def build_glb(parts: list[Part]) -> tuple[bytes, dict]:
             for chart in p.charts:
                 pts = [c for q in chart for c in q[0]]
                 charts_flat.append((pts, chart[0][1]))
-            uvs, px = layout(charts_flat, TPM) if p.bake == "MAP" else (None, None)
+            dens = p.tpm or TPM_BY_GROUP.get(p.group, TPM)
+            uvs, px = layout(charts_flat, dens) if p.bake == "MAP" else (None, None)
             chart_rects = []
             for ci, chart in enumerate(p.charts):
                 k = 0
@@ -302,6 +305,8 @@ def build_glb(parts: list[Part]) -> tuple[bytes, dict]:
                   "hash": "0" * 32}
             if px:
                 hp["uv1_px"] = list(px)
+            if p.tpm:
+                hp["texels_per_m"] = p.tpm
             if p.source:
                 hp["source"] = p.source
             hp["material"] = p.material
@@ -373,7 +378,8 @@ def scene_doc(extra: dict, parts: list[Part]) -> dict:
         "storeys": STOREYS,
         "recipe": {
             "light": "SOFT",
-            "quality": {"preset": "DRAFT", "texels_per_m": TPM, "samples": 16, "page_size": PAGE},
+            "quality": {"preset": "DRAFT", "texels_per_m": TPM, "texels_per_m_by_group": TPM_BY_GROUP, "samples": 16,
+                        "page_size": PAGE},
             "include": {"storeys": [GF, FF], "groups": ["house", "garden", "furniture", "ceilItems"]},
             "open_storeys": [GF],
             "seasons": SEASONS,
@@ -499,6 +505,8 @@ def bake_package(scene: dict, parts: list[Part], extra: dict, snow: list[Part], 
                                                                   ((1.0, 0.97, 0.92) if mid != "winter-night"
                                                                    else (1.0, 0.86, 0.7))],
                                                     "exposure": 0.0},
+                            "sun_light": None if m["sun"]["elevation"] < 0 else
+                            [round(2.5 * SKY[mid] * c, 6) for c in (1.0, 0.97, 0.92)],
                             "maps": dict(sorted(entries[""].items())), "open": {GF: dict(sorted(entries[GF].items()))}})
     snow_glb, _ = build_glb(snow)
     files["snow/winter.glb"] = snow_glb

@@ -162,7 +162,7 @@ def glb_problems(glb: Glb) -> list[str]:
 
 
 def read_surfaces(glb: Glb, rep: Report, where: str, relaxed: bool, *, snow: bool,
-                  texels_per_m: float | None = None) -> Surfaces:
+                  quality: dict | None = None) -> Surfaces:
     out = Surfaces()
     for p in glb_problems(glb):
         rep.error(f"{where}: {p}")
@@ -175,13 +175,23 @@ def read_surfaces(glb: Glb, rep: Report, where: str, relaxed: bool, *, snow: boo
     surf_schema = jsonschema.Draft202012Validator(_schema("surface", relaxed))
     for i, node in enumerate(nodes):
         try:
-            _one_surface(glb, i, node, world, out, rep, where, surf_schema, snow, texels_per_m)
+            _one_surface(glb, i, node, world, out, rep, where, surf_schema, snow, quality)
         except Exception as e:  # noqa: BLE001 – whatever a hostile file holds: report it, never crash
             rep.error(f"{where} node {i}: cannot be read ({type(e).__name__}: {e})")
     return out
 
 
-def _one_surface(glb, i, node, world, out, rep, where, surf_schema, snow, texels_per_m):
+def density(hp: dict, quality: dict | None) -> float | None:
+    """A MAP surface's texels per metre (FORMAT.md 6): its own value, else the recipe's for its group, else the
+    recipe's default."""
+    if "texels_per_m" in hp:
+        return hp["texels_per_m"]
+    if quality is None:
+        return None
+    return (quality.get("texels_per_m_by_group") or {}).get(hp["group"], quality["texels_per_m"])
+
+
+def _one_surface(glb, i, node, world, out, rep, where, surf_schema, snow, quality):
     extras = node.get("extras")
     hp = extras.get("hp") if isinstance(extras, dict) else None
     has_mesh = "mesh" in node
@@ -271,7 +281,7 @@ def _one_surface(glb, i, node, world, out, rep, where, surf_schema, snow, texels
             rep.error(f"{where}: '{sid}' has bake 'MAP' but its node is scaled or mirrored – a surface with a light "
                       "map may only be turned and moved (its metres are the light map's metres)")
         else:
-            _check_uv1(glb, mi, hp, rep, where, texels_per_m)
+            _check_uv1(glb, mi, hp, rep, where, density(hp, quality))
     elif "uv1_px" in hp:
         rep.warn(f"{where}: '{sid}' has uv1_px but bake '{hp['bake']}' – it is ignored")
     info["box"] = _box(glb, mi, world[i])
@@ -346,7 +356,7 @@ def _check_uv1(glb: Glb, mesh_index: int, hp: dict, rep: Report, where: str, tex
                         break
     if stretched:
         rep.error(f"{where}: '{sid}': {stretched} triangles are stretched in the light map – 1 m must be "
-                  f"{texels_per_m:g} texels (recipe.quality.texels_per_m) in every direction")
+                  f"{texels_per_m:g} texels (the surface's texels_per_m) in every direction")
         return
     rects: dict = {}
     for pts, key in tris:
@@ -521,7 +531,7 @@ def check_scene(pkg: Package, rep: Report) -> dict | None:
         rep.error(f"house.glb: {e}")
         return None
     surf = read_surfaces(glb, rep, "house.glb", relaxed, snow=False,
-                         texels_per_m=rec["quality"]["texels_per_m"])
+                         quality=rec["quality"])
     page = rec["quality"]["page_size"]
     inc_st, inc_gr = set(rec["include"]["storeys"]), set(rec["include"]["groups"])
     texels = 0
@@ -571,6 +581,10 @@ def check_bake(pkg: Package, rep: Report, scene: dict | None = None) -> None:
     if not _validate(doc, "bake", relaxed, rep, "bake.json"):
         return
     used = {"bake.json"}
+    if doc["light"] != "SOFT":
+        for m in doc["moments"]:
+            if m.get("sun_light") is not None:
+                rep.error(f"moment '{m['id']}': sun_light is only for light 'SOFT' (with '{doc['light']}' it is null)")
     pages = _unique(doc["pages"], "page", rep)
     vfiles = _unique(doc["vertex_files"], "vertex file", rep)
     page_size = {}
@@ -709,9 +723,10 @@ def _against_scene(doc: dict, scene: dict, snow_ids: dict, rep: Report) -> None:
         rep.error("bake.json's scene.scene_hash differs from the scene's, though the export id is the same")
     if doc["light"] != rec["light"]:
         rep.error(f"light '{doc['light']}' differs from the recipe's '{rec['light']}'")
-    if abs(doc["quality"]["texels_per_m"] - rec["quality"]["texels_per_m"]) > 1e-9:
-        rep.error(f"texels_per_m {doc['quality']['texels_per_m']} differs from the recipe's "
-                  f"{rec['quality']['texels_per_m']} (the light-map UVs were laid out for that)")
+    nights = {m["id"] for m in rec["moments"] if m["sun"]["elevation"] < 0}
+    for m in doc["moments"]:
+        if m.get("sun_light") is not None and m["id"] in nights:
+            rep.error(f"moment '{m['id']}': sun_light at night – the sun is below the horizon (null)")
     for p in doc["pages"]:
         if max(p["size"]) > rec["quality"]["page_size"]:
             rep.error(f"page '{p['id']}' is larger than the recipe's page_size {rec['quality']['page_size']}")

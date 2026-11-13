@@ -279,6 +279,22 @@
         "$ref": "#/$defs/entry"
        }
       }
+     },
+     "sun_light": {
+      "oneOf": [
+       {
+        "type": "array",
+        "items": {
+         "type": "number",
+         "minimum": 0
+        },
+        "minItems": 3,
+        "maxItems": 3
+       },
+       {
+        "type": "null"
+       }
+      ]
      }
     },
     "required": [

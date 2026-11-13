@@ -433,8 +433,8 @@ def test_bake_pictures():
 
 def test_bake_against_the_recipe():
     has(bake_errors(edit_json(files_of(BAKE), "bake.json", lambda d: d.update(light="ALL"))), "differs from the recipe")
-    has(bake_errors(edit_json(files_of(BAKE), "bake.json", lambda d: d["quality"].update(texels_per_m=32))),
-        "texels_per_m")
+    # the bake's own texels_per_m is only an echo: each result is checked against its surface's map size
+    assert not bake_errors(edit_json(files_of(BAKE), "bake.json", lambda d: d["quality"].update(texels_per_m=32)))
     has(bake_errors(edit_json(files_of(BAKE), "bake.json", lambda d: d["moments"][0].update(id="dawn"))),
         "not in the recipe")
 
@@ -639,7 +639,7 @@ def test_vertex_results_do_not_share_values():
 
 def test_minor_versions_extend_only_the_open_lists():
     def newer_group(doc, g):
-        node(doc, "ground:plot")["extras"]["hp"]["group"] = "allotment"
+        node(doc, "garden:ga_terrace")["extras"]["hp"]["group"] = "allotment"  # has its own texels_per_m
     f = edit_json(edit_glb(files_of(SCENE), "house.glb", newer_group), "scene.json",
                   lambda d: (d.update(version="1.1"), d["recipe"]["include"]["groups"].append("allotment")))
     rep = check(zipped(f))
@@ -655,3 +655,37 @@ def test_minor_versions_extend_only_the_open_lists():
 def test_minor_versions_compare_as_numbers():
     rep = check(zipped(edit_json(files_of(SCENE), "scene.json", lambda d: d.update(version="1.10"))))
     assert rep.ok and any("1.10 is newer" in w for w in rep.warnings)
+
+
+# ------------------------------------------------------------------ the two leads' review (task 0016)
+def test_density_per_surface_and_per_group():
+    pkg = Package.open(SCENE)
+    assert pkg.doc["recipe"]["quality"]["texels_per_m_by_group"] == {"garden": 6.0}
+    g = Glb.parse(pkg.files["house.glb"])
+    assert node(g.json, "garden:ga_terrace")["extras"]["hp"]["texels_per_m"] == 10.0
+    # the plot was laid out at its group's 6 texels/m: checked at the default 16 it is stretched
+    f = edit_json(files_of(SCENE), "scene.json", lambda d: d["recipe"]["quality"].pop("texels_per_m_by_group"))
+    errs = scene_errors(f)
+    has(errs, "'ground:plot'")
+    has(errs, "stretched")
+    assert not any("ga_terrace" in e for e in errs)  # its own value wins over the group's
+    # a surface's own value that does not fit its layout
+    f = edit_glb(files_of(SCENE), "house.glb",
+                 lambda d, g: node(d, "garden:ga_terrace")["extras"]["hp"].update(texels_per_m=20.0))
+    has(scene_errors(f), "stretched")
+
+
+def test_sun_light():
+    b = Package.open(BAKE).doc
+    by = {m["id"]: m for m in b["moments"]}
+    assert by["winter-night"]["sun_light"] is None and len(by["summer-morning"]["sun_light"]) == 3
+    has(bake_errors(edit_json(files_of(BAKE), "bake.json",
+                              lambda d: d["moments"][3].update(sun_light=[1.0, 1.0, 1.0]))), "at night")
+
+    def all_baked(d):
+        d["light"] = "ALL"
+    errs = check(zipped(edit_json(files_of(BAKE), "bake.json", all_baked))).errors
+    has(errs, "only for light 'SOFT'")
+    # optional: a bake without it is fine
+    assert not bake_errors(edit_json(files_of(BAKE), "bake.json",
+                                     lambda d: [m.pop("sun_light") for m in d["moments"]]))

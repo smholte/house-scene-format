@@ -9,9 +9,9 @@ Fresing Render ── Import from House Planner, Bake, Export ──▶  house.h
 House Planner  ── Import bake ──▶  the version shows baked light; switching moments is instant on any device
 ```
 
-Status: **draft for the two leads' review** (task 0016 of House Planner). Nothing is final until the tag `v1.0`.
-The words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119. The schemas in `schemas/` are part of this text;
-where they and this text differ, tell the leads – it is a bug in one of them.
+Status: **reviewed by both leads (13 Nov 2026), their changes applied** – version 1.0 once the House Planner lead
+tags `v1.0` (House Planner task 0016). The words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119. The schemas
+in `schemas/` are part of this text; where they and this text differ, tell the leads – it is a bug in one of them.
 
 Contents: 1 Ideas · 2 Packages and versions · 3 Coordinates · 4 Surfaces · 5 The surface hash · 6 Light-map UVs ·
 7 scene.json · 8 bake.json · 9 How House Planner uses a bake · 10 How Fresing Render reads a scene · 11 Sizes ·
@@ -113,6 +113,7 @@ it is a lamp (section 4.4). Grouping nodes without a mesh carry no `extras.hp`. 
 | `bake` | required | `MAP` (a light map on UV set 1), `VERTEX` (light per vertex), or `NO` (takes part in the light – casts shadows, lets light through by its material – but gets no result). A `MAP` surface's node may be turned and moved but not scaled or mirrored (its metres are the map's metres). |
 | `hash` | required with a mesh | The surface hash (section 5). |
 | `uv1_px` | required for `MAP` | [W, H]: the size in texels of this surface's light map (section 6). |
+| `texels_per_m` | optional, `MAP` | This surface's texel density (4 … 400), when it differs from its group's (section 6). |
 | `source` | optional | The id in House Planner's model the piece comes from (wall, room, furniture item, garden area …). Several surfaces can share one (a wall's two sides and edge). For furniture it names the **piece** that moves as a whole. |
 | `material` | optional | House Planner's material id (`oak`, `brick`, …): lets Fresing Render swap in its own, better looks later. The glTF material holds the look itself. |
 | `on` | snow only | The id of the surface a snow layer lies on (section 8.6). |
@@ -218,11 +219,13 @@ page_uv = ((rect.x + u × W) / page_width,  (rect.y + v × H) / page_height)    
 
 Rules (checked by `check.py`):
 
-1. Texel density: `texels_per_m` of the recipe (section 7.1), in the node's own metres. W and H follow from it;
-   each is at most `page_size − 4`.
+1. Texel density, **per surface**, in the node's own metres: the surface's own `texels_per_m` when it has one, else
+   the recipe's `quality.texels_per_m_by_group` for its group, else the recipe's `quality.texels_per_m` (section
+   7.1). The plot, the street and the neighbours need far less detail than the rooms. W and H follow from it; each is
+   at most `page_size − 4`.
 2. A surface's triangles fall into **charts** – flat, connected pieces that share their UV points (a wall side with its
    window hole is one chart; each face of a step is one). Each chart is projected onto its own plane without
-   stretching: every triangle edge is as long in texels as in metres × `texels_per_m` (the checker allows 2 % +
+   stretching: every triangle edge is as long in texels as in metres × the surface's density (the checker allows 2 % +
    0.1 texel), and no texel centre is covered by two triangles (no folds).
 3. Charts are packed by their **rectangles**: at least **4 texels** between two charts' rectangles, at least
    **2 texels** from a chart to the edge of the map. All UVs lie in 0 … 1. So nothing overlaps and the baker's
@@ -233,8 +236,8 @@ Rules (checked by `check.py`):
 horizontal direction in the face and the height, top row first; rectangles packed in rows, tallest first). A better
 packer is allowed as long as rules 1–4 hold.
 
-Because the UVs follow from `texels_per_m`, a bake MUST use the recipe's `texels_per_m` exactly; a bake at another
-density needs a new export.
+Because the UVs follow from the densities, a bake MUST give each surface a map of exactly its `uv1_px`; a bake at
+other densities needs a new export.
 
 **In Blender** (measured, 5.2.3, the sample): `TEXCOORD_1` becomes the second UV layer (`UVMap.001`) with
 v → 1 − v, and the vertex count and order are kept (the importer's "merge vertices" off, its default). So Blender's
@@ -270,8 +273,10 @@ row 0 of a baked image is the **bottom** of the map: write it to the page bottom
 | `ALL` | Everything baked | sky + sun + lamps, direct and bounce | reflections and the sun's highlight; no live matte sun on baked surfaces |
 
 `quality`: `preset` (`DRAFT` / `NORMAL` / `FINE`: 0107's samples 16 / 64 / 256 when `samples` is null),
-`texels_per_m` (4 … 400, decided by House Planner from the preset and the area – it lays out the UVs for it),
-`samples` (or null = from the preset), `page_size` (1024 or 2048: the largest atlas page the bake may write).
+`texels_per_m` (4 … 400: the default density, decided by House Planner from the preset and the area – it lays out the
+UVs for it), `texels_per_m_by_group` (optional: Show-button group → density, e.g. `{"garden": 6, "street": 4,
+"houses": 4, "park": 4}`; a surface's own `texels_per_m` wins over both), `samples` (or null = from the preset),
+`page_size` (1024 or 2048: the largest atlas page the bake may write).
 
 ### 7.2 Storeys
 
@@ -313,7 +318,10 @@ results come as a second set (`open`) in each moment (section 8.3), for that sto
   convention>})` – the turn from a vector to its sky's `sun_rotation` (0109's `SUN_ROTATION_ZERO_AZ`) is Fresing
   Render's to write (I24c). Example (the sample's summer morning): direction (0.8436, 0.4902, 0.2192) → Blender
   (0.8436, −0.2192, 0.4902): elevation 29.35°, the sun's bearing turned 14.6° from Blender's +X towards −Y. A moment with the sun
-  below the horizon (elevation < 0) has **no sun** in the bake: sky (night sky) and lamps only. The checker warns when the sun is more than 2° from where it stands at
+  below the horizon (elevation < 0) has **no sun** in the bake (no sun disc, no sun lamp): the night sky as Fresing
+  Render renders that clock time (0109: stars, the moon when it shows one) and the moment's lamps – so the bake and
+  the photos of the same moment agree. At night `SOFT` and `ALL` give the same light. The checker warns when the sun is
+  more than 2° from where it stands at
   the date, time, offset and place (a time-zone mistake).
 
 ### 7.6 Cameras, photos, videos
@@ -348,6 +356,7 @@ a `recipe.walk_paths` list and a video kind `walk`.
   "vertex_files": [{"id": "v0", "file": "light/v0.bin"}],
   "moments": [{"id": "summer-morning",
                "encoding": {"curve": 2.0, "scale": 1.073523, "reference": [1.0, 0.97, 0.92], "exposure": 0.0},
+               "sun_light": [2.5, 2.425, 2.3],
                "maps": {"floor:r_bed": {"page": "p0", "rect": [871, 0, 55, 88]},
                         "furniture:f_table:0": {"vertex": "v0", "offset": 96, "count": 88}},
                "open": {"st_ground": { … same form, that storey's surfaces only … }}}],
@@ -361,8 +370,9 @@ a `recipe.walk_paths` list and a video kind `walk`.
 
 ### 8.1 Which export
 
-`scene.id` and `scene.scene_hash` name the export the bake was made from. `light`, `uv1` and
-`quality.texels_per_m` MUST be the recipe's.
+`scene.id` and `scene.scene_hash` name the export the bake was made from. `light` and `uv1` MUST be the recipe's.
+Each `MAP` result's rectangle is that surface's `uv1_px` (densities are per surface, section 6); `quality` only
+echoes the recipe's default `texels_per_m` and says how the bake was made.
 
 ### 8.2 `surfaces`
 
@@ -411,6 +421,11 @@ House Planner can show a moment two ways: **factor** – `L / reference` times i
 does: baked and live surfaces agree even if its sky differs a little from Cycles'); or **absolute** – `L` × 2^exposure
 (for night moments, where `reference` is near 0).
 
+`sun_light` (optional, per moment): [R, G, B], the sun's **direct** light on a white matte surface facing the sun,
+in the same units as L (Fresing Render: its open probe's reference minus the reference without the sun). With `SOFT`
+in absolute mode House Planner adds its live sun at this strength. It is `null` (or left out) with `ALL` and `LIVE`,
+at night, and when the light has no separate sun (a 360° photo, a studio). In factor mode House Planner can ignore it.
+
 ### 8.4 Light per vertex
 
 `vertex_files` are raw `.bin` files: 3 bytes (R, G, B; the encoding of 8.3, with the moment's `scale`) per vertex.
@@ -427,9 +442,12 @@ House Planner's rule (proposed – section 9) decides what happens when a piece 
 
 One `.glb` per season with snow (`snow`). Each node is a **snow layer on one surface**: kind `snow`, `on` = that
 surface's id, its `storey` and `group` (so it hides with the surface), `bake` `VERTEX` and a `hash`. The layers are in
-the scene's coordinates and their light is in the moments of that season (`maps` keyed by the snow ids). Fresing
-Render makes them from its 0109 snow (upward faces under the open sky, thickness from `snow_cover`); House Planner
-shows them with its own snow material. Falling snow is only in photos and videos.
+the scene's coordinates and their light is in the moments of that season (`maps` keyed by the snow ids). They are
+**new geometry built by 0109's rule** – 0109's own snow is a material layer, which three.js cannot run: faces that
+look up and lie under the open sky (nothing within 0109's `SKY_DISTANCE`, 25 m, above them), thickness from
+`snow_cover` (1 ≈ 10 cm). Large layers (plot, roofs) are cut into pieces of about 0.5 m so their light per vertex has
+enough points. Fresing Render's own photos and videos keep 0109's material layer; both follow the same rule, so they
+agree. House Planner shows the layers with its own snow material. Falling snow is only in photos and videos.
 
 ### 8.7 Photos, videos, problems
 
@@ -453,29 +471,39 @@ with. `problems`: plain sentences for the owner (what was skipped or changed); H
 - **One storey seen from above:** when the storeys above a storey are hidden and the bake has `open` results for it,
   that storey's surfaces use them; all others use `maps`.
 - **Snow** layers are shown with their surface and hidden when it is hidden or out of date.
-- The bake is stored in the asset library (0009) with the house version, one moment loaded at a time.
+- The 0.5 m and 0.3 m margins are one constant each in House Planner (agreed by its lead, 13 Nov).
+- The bake is the owner's own work: stored with the house version (a copied version shares it), one moment loaded at
+  a time – not in the re-downloadable model library.
 
 ## 10. How Fresing Render reads a scene (for I24c)
 
-- Import `house.glb` with Blender's glTF importer (merge vertices off). Each object's custom property `hp` is its
-  label; `hp["id"]` is the id to write results under (0107's `ids={object: hp["id"]}`).
-- `MAP` objects: `lightbake.bake(objects, light=recipe.light, uv="UV1", texels_per_m=recipe.quality.texels_per_m,
-  samples=…, sky=<the moment's sun>, lamps=<the moment's lamps>, ...)`; each object's image MUST be exactly its
-  `uv1_px` (W × H) – 0107 sizes `UV1` images "from their area", so `lightbake.bake` needs a per-object size (a
-  request to Fresing Render's Web 3D lane). `Item.pixels` (H × W, Blender rows bottom-up) → the page rectangle
-  (top-down). `VERTEX` objects: `uv="VERTEX"`; `Item.values` → the vertex file in the glb's
+- Import `house.glb` with Blender's glTF importer: merge vertices off, **Lighting Mode "Standard"** (its default:
+  candela → watts), so both apps test the sample's ceiling lamp the same way. Each object's custom property `hp` is
+  its label; `hp["id"]` is the id to write results under (0107's `ids={object: hp["id"]}`). A lamp's light is a
+  child object of its fitting; `lamps=` gets the moment's light objects.
+- `MAP` objects: `lightbake.bake(objects, light=recipe.light, uv="UV1", sizes={object: hp["uv1_px"]},
+  samples=…, sky=<the moment's sun>, lamps=<the moment's lamps>, ...)` – each object's image is exactly its
+  `uv1_px` (W × H; `sizes` is the additive argument the Fresing Render lead agreed, 13 Nov; a size that disagrees
+  with the layout by more than 2 % becomes a `problems` line). `Item.pixels` (H × W, Blender rows bottom-up) → the
+  page rectangle (top-down). `VERTEX` objects: `uv="VERTEX"`; `Item.values` → the vertex file in the glb's
   vertex order. `NO` objects take part in the light only.
-- Per moment: move the sun (`sky`), set clouds and lamps; per season: build the snow (0109's snow on imported
-  objects, `weather_look.add_objects`), hide `foliage` when `bare`; for each `open` storey: hide what lies above it
-  and bake that storey's objects again.
-- Encode absolute L with the moment's `scale` (8.3) and write the package.
+- Per moment: the sun from its vector – glTF (x, y, z) → Blender (x, −z, y) → scene azimuth and elevation → 0109's
+  sky (`sun_rotation = radians(SUN_ROTATION_ZERO_AZ − azimuth)`), checked against the moment's own azimuth and
+  elevation (a `problems` line above 0.5°); clouds and lamps. Per season: build the snow **layer meshes** (8.6) for
+  the package; `weather_look.add_objects` (0109's material layer) only for Fresing Render's own photos and videos;
+  hide `foliage` when `bare`. For each `open` storey: hide everything of a higher `level` and bake that storey's
+  objects again.
+- Encode absolute L with the moment's `scale` (8.3; rounding half away from zero – 0107's own encode rounds half to
+  even, so the house package writes its own), add `sun_light` for `SOFT`, and write the package.
 
 ## 11. Sizes (phones)
 
 - Pages of 1024 px (phones) or 2048 px (PC); House Planner sets `page_size`. One moment SHOULD fit in **4 pages**
   (the checker warns above that): on a phone one moment's pages are held in memory, 4 × 1024² × 4 bytes = 16 MB.
-- `texels_per_m`: about 16 (Draft) … 40 (Fine) for a house; the sample house (two storeys, 7 × 9 m, plot
-  15 × 23 m) at 16 texels/m fills 37 % of one 1024 px page per moment, 51 % with its open ground floor.
+- Densities: about 16 (Draft) … 40 (Fine) texels/m for the house, 4 … 8 for the plot, the street, the neighbours and
+  the park (`texels_per_m_by_group`). The sample house (two storeys, 7 × 9 m) at 16 texels/m with its plot
+  (15 × 23 m) at 6 fills 30 % of one 1024 px page per moment, 43 % with its open ground floor (37 % / 51 % with the
+  plot at 16). Real numbers for the owner's house are measured on his devices (House Planner's I24d).
 - Furniture, frames, lamps and plants per vertex (3 bytes a vertex): small.
 - `house.glb`: the checker warns above 300 MB.
 
