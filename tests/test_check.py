@@ -174,6 +174,9 @@ def test_zip_names_must_be_utf8():
     has(check(zip_with("caf\u00e9.txt", False)).errors, "not a UTF-8 name")
     assert not any("UTF-8 name" in e for e in check(zip_with("caf\u00e9.txt", True)).errors)
     assert not any("UTF-8 name" in e for e in check(zip_with("plain.txt", False)).errors)
+    # flag set but the bytes are not valid UTF-8: zipfile itself raises, the checker must report it
+    bad = zip_with("caf\u00e9.txt", True).replace("caf\u00e9.txt".encode(), b"caf\xe9\xe9.txt")
+    has(check(bad).errors, "not a UTF-8 name")
 
 
 def test_missing_and_unused_files():
@@ -724,4 +727,5 @@ def test_sun_light_zero_under_full_overcast_and_null_by_day():
     assert not bake_errors(edit_json(files_of(BAKE), "bake.json", set_day([0, 0, 0])))
     assert not bake_errors(edit_json(files_of(BAKE), "bake.json", set_day(None)))
     has(bake_errors(edit_json(files_of(BAKE), "bake.json",
-                              lambda d: d["moments"][3].update(sun_light=[0, 0, 0]))), "at night")
+                              lambda d: next(m for m in d["moments"] if m["id"] == "winter-night")
+                                         .update(sun_light=[0, 0, 0]))), "at night")

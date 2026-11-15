@@ -83,6 +83,8 @@ class Package:
             zf = zipfile.ZipFile(io.BytesIO(data))
         except zipfile.BadZipFile:
             raise PackageError("not a zip file") from None
+        except ValueError as e:  # UnicodeDecodeError: the UTF-8 flag is set but a name is not valid UTF-8
+            raise PackageError(f"a name in the zip is not a UTF-8 name ({e})") from None
         infos = zf.infolist()
         if len(infos) > MAX_FILES:
             raise PackageError(f"more than {MAX_FILES} files")

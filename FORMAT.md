@@ -57,7 +57,8 @@ JavaScript and Python.
 
 **Versions.** `scene.json` and `bake.json` start with `"format": "house-scene"` / `"house-bake"` and
 `"version": "<major>.<minor>"` (this text: `"1.0"`), two whole numbers compared as numbers (`1.10` is newer than
-`1.9`). A reader written for version *M.n*:
+`1.9`). A third number (`1.0.1`) names a version of this text and its checker only (clarifications, stricter checks of
+what the text already said): packages still say `"1.0"`, and the apps pin the tag (`v1.0.1`). A reader written for version *M.n*:
 
 - MUST refuse a package of another **major** version with a clear message, e.g. *"This bake was made by a newer
   Fresing Render (format 2.0). Update House Planner to read it."* – never read half of it.
