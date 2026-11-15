@@ -90,6 +90,9 @@ class Package:
         for info in infos:
             if info.is_dir():
                 continue
+            if not info.flag_bits & 0x800 and not info.filename.isascii():
+                # no UTF-8 flag: zipfile read the raw bytes as cp437, so a non-ASCII result means non-ASCII bytes
+                raise PackageError(f"'{info.filename}' is not a UTF-8 name (the zip's UTF-8 flag is not set)")
             why = safe_name(info.filename)
             if why:
                 raise PackageError(f"'{info.filename}': {why}")

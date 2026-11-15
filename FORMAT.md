@@ -1,4 +1,4 @@
-# House scene format – version 1.0
+# House scene format – version 1.0.1
 
 The files between **House Planner** (plans a house; three.js in a browser, also on a phone) and **Fresing Render**
 (Blender 5.2 + Cycles on a PC with a graphics card) for one round trip:
@@ -9,8 +9,8 @@ Fresing Render ── Import from House Planner, Bake, Export ──▶  house.h
 House Planner  ── Import bake ──▶  the version shows baked light; switching moments is instant on any device
 ```
 
-Status: **reviewed by both leads (13 Nov 2026), their changes applied** – version 1.0 once the House Planner lead
-tags `v1.0` (House Planner task 0016). The words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119. The schemas
+Status: **version 1.0 reviewed by both leads (13 Nov 2026), tag `v1.0`; text 1.0.1 (15 Nov 2026, task 0030) only
+clarifies – the packages are still version "1.0" – and makes the checker refuse what section 2 already forbade.** The words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119. The schemas
 in `schemas/` are part of this text; where they and this text differ, tell the leads – it is a bug in one of them.
 
 Contents: 1 Ideas · 2 Packages and versions · 3 Coordinates · 4 Surfaces · 5 The surface hash · 6 Light-map UVs ·
@@ -39,7 +39,9 @@ Contents: 1 Ideas · 2 Packages and versions · 3 Coordinates · 4 Surfaces · 5
 
 Both packages are **zip files** (stored or deflated, no encryption, UTF-8 names, forward slashes, no absolute paths,
 no `.` or `..` parts, no file listed twice). Readers MUST refuse anything else. Pictures and `.glb` files SHOULD be
-stored (they are compressed already), JSON deflated.
+stored (they are compressed already), JSON deflated. A name is UTF-8 when the zip's UTF-8 flag (general purpose bit 11)
+is set, or when its bytes are all ASCII (many writers set the flag only for non-ASCII names); a name without the flag
+that holds any other byte MUST be refused.
 
 | Package | Extension | Holds |
 | --- | --- | --- |
@@ -424,7 +426,13 @@ does: baked and live surfaces agree even if its sky differs a little from Cycles
 `sun_light` (optional, per moment): [R, G, B], the sun's **direct** light on a white matte surface facing the sun,
 in the same units as L (Fresing Render: its open probe's reference minus the reference without the sun). With `SOFT`
 in absolute mode House Planner adds its live sun at this strength. It is `null` (or left out) with `ALL` and `LIVE`,
-at night, and when the light has no separate sun (a 360° photo, a studio). In factor mode House Planner can ignore it.
+at night, and when the light has no separate sun (a 360° photo, a studio). Under a **full overcast** by day with `SOFT`
+it is `[0, 0, 0]` (a measured direct sun of nothing), not `null`. In factor mode House Planner can ignore it.
+
+"Facing the sun" means the light on a surface turned **straight at the sun** (normal incidence): House Planner's live
+sun is a directional light of exactly that strength, times N·L. A baker may measure it any way it likes, but SHOULD NOT
+get it by dividing an upward probe's sun light by sin(elevation) when the sun is low (the noise grows as
+1 / sin(elevation): ×12 at 4.8°); a probe facing the sun, or the sky model's own sun value, gives it without that noise.
 
 ### 8.4 Light per vertex
 

@@ -151,6 +151,31 @@ def test_not_a_zip_and_unsafe_paths():
     has(check(buf.getvalue()).errors, "exactly one")
 
 
+def test_zip_names_must_be_utf8():
+    def zip_with(name, flag):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("scene.json", "{}")
+            info = zipfile.ZipInfo(name)
+            z.writestr(info, "x")
+        data = bytearray(buf.getvalue())
+        # zipfile sets bit 11 itself for non-ASCII names; set it the way the test wants (local + central headers)
+        for sig, off in ((b"PK\x03\x04", 6), (b"PK\x01\x02", 8)):
+            i = 0
+            while (i := data.find(sig, i)) >= 0:
+                nlen = int.from_bytes(data[i + 28:i + 30] if sig == b"PK\x01\x02" else data[i + 26:i + 28], "little")
+                nstart = i + (46 if sig == b"PK\x01\x02" else 30)
+                if bytes(data[nstart:nstart + nlen]) == name.encode("utf-8"):
+                    flags = int.from_bytes(data[i + off:i + off + 2], "little")
+                    flags = (flags | 0x800) if flag else (flags & ~0x800)
+                    data[i + off:i + off + 2] = flags.to_bytes(2, "little")
+                i += 4
+        return bytes(data)
+    has(check(zip_with("caf\u00e9.txt", False)).errors, "not a UTF-8 name")
+    assert not any("UTF-8 name" in e for e in check(zip_with("caf\u00e9.txt", True)).errors)
+    assert not any("UTF-8 name" in e for e in check(zip_with("plain.txt", False)).errors)
+
+
 def test_missing_and_unused_files():
     f = files_of(SCENE)
     del f["house.glb"]
@@ -689,3 +714,14 @@ def test_sun_light():
     # optional: a bake without it is fine
     assert not bake_errors(edit_json(files_of(BAKE), "bake.json",
                                      lambda d: [m.pop("sun_light") for m in d["moments"]]))
+
+
+def test_sun_light_zero_under_full_overcast_and_null_by_day():
+    day = next(m for m in Package.open(BAKE).doc["moments"] if m.get("sun_light") is not None)
+
+    def set_day(v):
+        return lambda d: next(m for m in d["moments"] if m["id"] == day["id"]).update(sun_light=v)
+    assert not bake_errors(edit_json(files_of(BAKE), "bake.json", set_day([0, 0, 0])))
+    assert not bake_errors(edit_json(files_of(BAKE), "bake.json", set_day(None)))
+    has(bake_errors(edit_json(files_of(BAKE), "bake.json",
+                              lambda d: d["moments"][3].update(sun_light=[0, 0, 0]))), "at night")

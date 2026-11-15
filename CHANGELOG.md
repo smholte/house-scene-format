@@ -3,6 +3,16 @@
 Versions of the house scene format. Newest first. A minor version only adds (section 2 of FORMAT.md); each version is
 a tag (`v1.0`, `v1.1` …) that House Planner and Fresing Render pin.
 
+## 1.0.1 – 15 Nov 2026 – clarifications and a stricter name check (tag `v1.0.1` by the owner)
+
+Answers to Fresing Render's task 0114 (House Planner task 0030). Packages stay version "1.0"; samples unchanged.
+- Section 2: what a UTF-8 name is (flag set, or pure ASCII); the checker now refuses a non-ASCII name without the flag
+  (it accepted it, Python reading it as cp437).
+- Section 8.3: `sun_light` is `[0, 0, 0]` under a full overcast by day; "facing the sun" is normal incidence, and how not
+  to measure it at a low sun. Checker tests for `[0, 0, 0]` and `null` by day under `SOFT`.
+- Section 10: unchanged (the 0.5° sun check judges the writer; a reader that reads on and reports a problem is already
+  what it asks).
+
 ## 1.0 – 13 Nov 2026 – first version (tag `v1.0` by the House Planner lead)
 
 First version (House Planner task 0016), for the two leads' review:
