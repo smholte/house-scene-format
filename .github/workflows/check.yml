@@ -23,6 +23,6 @@ jobs:
       - name: Samples are up to date (tools/make_samples.py makes the same bytes)
         run: python tools/make_samples.py --check
       - name: The samples pass the checker
-        run: python check.py samples/sample-house.hpscene samples/sample-house.hpbake
+        run: python check.py samples/sample-house.hpscene samples/sample-house.hpbake samples/example-house.hpscene
       - name: Tests (the checker on the samples and on broken copies)
         run: python -m pytest -q tests

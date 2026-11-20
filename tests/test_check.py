@@ -20,6 +20,7 @@ from hsf.glb import Glb, pack  # noqa: E402
 from hsf.package import Package, write  # noqa: E402
 
 SCENE = ROOT / "samples" / "sample-house.hpscene"
+EXAMPLE = ROOT / "samples" / "example-house.hpscene"  # House Planner's made-up example house (1.0.2)
 BAKE = ROOT / "samples" / "sample-house.hpbake"
 
 
@@ -71,6 +72,19 @@ def test_samples_are_valid():
     b = check(BAKE, scene=SCENE)
     assert b.ok and not b.warnings, b.text()
     assert check(BAKE).ok  # also alone
+
+
+def test_example_house_is_valid_and_a_real_house():
+    s = check(EXAMPLE)
+    assert s.ok and not s.warnings, s.text()
+    pkg = Package.open(EXAMPLE)
+    assert pkg.doc["version"] == "1.0" and len(pkg.doc["storeys"]) == 3
+    g = Glb.parse(pkg.files["house.glb"])
+    hps = [n["extras"]["hp"] for n in g.json["nodes"] if "extras" in n]
+    kinds = {h["kind"] for h in hps}
+    assert {"wall", "floor", "roof", "opening", "glass", "furniture", "lamp", "ground", "garden", "plant"} <= kinds, kinds
+    assert {h["group"] for h in hps} <= {"house", "furniture", "ceilItems", "garden"}  # no street, neighbours or park
+    assert EXAMPLE.stat().st_size < 7_000_000  # small enough for a quick test bake
 
 
 def test_samples_are_up_to_date():
