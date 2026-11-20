@@ -10,7 +10,7 @@ House Planner task 0044. Packages stay version "1.0"; the format, the schemas an
   storeys, a 40° gable roof with windows and doors, furnished rooms, a terrace and a planted garden (for snow); exported
   by the app (Export → For Fresing Render…, version "Plan – study", groups house, furniture, ceiling lamps and garden –
   no electrics points, street, neighbours or park; Draft, Soft, summer and winter, morning / afternoon / evening, the
-  current camera). 5.9 MB, 44,832 triangles, 299 surfaces, 1.17 light-map pages a moment. The checker passes it with no
+  current camera). 5.8 MB, 44,808 triangles, 297 surfaces, 1.17 light-map pages a moment. The checker passes it with no
   error or warning (a test). Not made by `tools/make_samples.py`: the brick box `sample-house.*` stays as it was.
 - `LICENSE`: MIT.
 
